@@ -978,10 +978,17 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
 
       <div style={{ flex:1, overflowY:"auto", padding:"20px 24px 32px" }}>
         <div style={{ position:"relative" }}>
-          {/* Track line */}
-          <div style={{ position:"absolute", left:10, top:10, bottom:10, width:2, background:C.border }}/>
-          <div style={{ position:"absolute", left:10, top:10, width:2, height:"36%", background:C.blue }}/>
-
+            {/* Track line */}
+            <div style={{ position:"absolute", left:10, top:10, bottom:10, width:2, background:C.border }}/>
+            {stops.length > 1 && (() => {
+              const doneCount = stops.filter(s => s.state === "done").length;
+              const currentIndex = stops.findIndex(s => s.state === "current");
+              const progressIndex = currentIndex >= 0 ? currentIndex : doneCount;
+              const progressPercent = (progressIndex / (stops.length - 1)) * 100;
+              return (
+                <div style={{ position:"absolute", left:10, top:10, width:2, height:`${progressPercent}%`, background:C.blue }}/>
+              );
+            })()}
           {stops.map((s, i) => (
             <div key={s.name} style={{ display:"flex", gap:20, marginBottom: i < stops.length-1 ? 24 : 0, alignItems:"center", animation:`fadeUp 0.3s ${i*0.07}s both` }}>
               {/* Dot */}
