@@ -1497,7 +1497,7 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
 
   return (
     <div style={{ position:"absolute", inset:0, overflow:"hidden" }}>
-      <div style={{ position:"absolute", inset:0 }}><RouteMapView
+      <div style={{ position:"absolute", inset:0, zIndex:0 }}><RouteMapView
           stops={stops}
           busPosition={busPosition}
           studentLocations={sharedStudents}
@@ -1544,7 +1544,7 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
       )}
 
       {/* Bottom sheet */}
-      <div style={{ position:"absolute", bottom:0, left:0, right:0, background:"rgba(13,27,42,0.94)", backdropFilter:"blur(10px)", borderRadius:"20px 20px 0 0" }}>
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, zIndex:1100, background:"rgba(13,27,42,0.94)", backdropFilter:"blur(10px)", borderRadius:"20px 20px 0 0" }}>
         <div style={{ width:36, height:3, borderRadius:2, background:"rgba(255,255,255,0.15)", margin:"10px auto 0" }}/>
         <div style={{ padding:"12px 20px 32px" }}>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
