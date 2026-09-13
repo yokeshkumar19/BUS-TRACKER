@@ -1,0 +1,10 @@
+{
+  "description": "Track college buses in real-time, view routes and stops, check ETAs, and request pickups with this user-friendly app designed for Rajalakshmi Institute of Technology students.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
