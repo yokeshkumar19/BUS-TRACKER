@@ -580,20 +580,16 @@ function RouteMapView({
       }}
       onError={() => setMapError(true)}
     >
-      {routePath.length > 1 && (
-        <Source id="full-route" type="geojson" data={fullLineGeoJson}>
+      {remainingRoute.length > 1 && (
+        <Source id="route-line" type="geojson" data={remainingLineGeoJson}>
           <Layer
-            id="full-route-line"
+            id="route-line-casing"
             type="line"
-            paint={{ "line-color": "#FFFFFF", "line-width": 11, "line-opacity": 0.9 }}
+            paint={{ "line-color": "#FFFFFF", "line-width": 13, "line-opacity": 0.95 }}
             layout={{ "line-cap": "round", "line-join": "round" }}
           />
-        </Source>
-      )}
-      {remainingRoute.length > 1 && (
-        <Source id="remaining-route" type="geojson" data={remainingLineGeoJson}>
           <Layer
-            id="remaining-route-line"
+            id="route-line-blue"
             type="line"
             paint={{ "line-color": C.blue, "line-width": 9, "line-opacity": 1 }}
             layout={{ "line-cap": "round", "line-join": "round" }}
