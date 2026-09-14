@@ -388,6 +388,10 @@ function bearingDegrees(a: { lat: number; lng: number }, b: { lat: number; lng: 
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
+function validCoordinate(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 const stopColor = (state: "done" | "current" | "upcoming") =>
   state === "current" ? "#2ECC71" : state === "done" ? "#9AA5AE" : C.blue;
 
@@ -445,7 +449,8 @@ function RouteMapView({
   studentLocations?: SharedStudentLocation[];
   height?: number;
 }) {
-  const plotted = stops.filter(s => typeof s.lat === "number" && typeof s.lng === "number");
+  const [mapError, setMapError] = useState(false);
+  const plotted = stops.filter(s => validCoordinate(s.lat) && validCoordinate(s.lng));
   const routeKey = plotted.map(s => `${s.lat},${s.lng}`).join(";");
   const [routePath, setRoutePath] = useState<[number, number][]>([]);
   const prevPositionRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -461,6 +466,10 @@ function RouteMapView({
 
   const midStop = plotted[Math.floor(plotted.length / 2)];
   const center = busPosition ?? (midStop ? { lat: midStop.lat!, lng: midStop.lng! } : { lat: 13.0072, lng: 79.6 });
+
+  if (mapError) {
+    return <MapView height={height} />;
+  }
 
   let nearestRouteIndex = -1;
   if (busPosition && routePath.length) {
@@ -531,6 +540,7 @@ function RouteMapView({
       style={{ width: "100%", height }}
       mapStyle="https://tiles.openfreemap.org/styles/liberty"
       scrollZoom={false}
+      onError={() => setMapError(true)}
     >
       {routePath.length > 1 && (
         <Source id="full-route" type="geojson" data={fullLineGeoJson}>
@@ -877,7 +887,7 @@ function StudentHome({
 // 4 ─ Live Map (hero screen)
 function LiveMapScreen({ onNav, buses, stopsByRoute, selectedBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; selectedBus?: FireBus }) {
   const bus = selectedBus ?? buses[0] ?? EMPTY_BUS;
-  const busPosition = bus.lat != null && bus.lng != null ? { lat: bus.lat, lng: bus.lng } : null;
+  const busPosition = validCoordinate(bus.lat) && validCoordinate(bus.lng) ? { lat: bus.lat!, lng: bus.lng! } : null;
 const stops = withLiveStopStates(stopsByRoute[bus.r] ?? [], busPosition);
   const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
   const etaMinutes = useRealEta(busPosition, nextStop);
