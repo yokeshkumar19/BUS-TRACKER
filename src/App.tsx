@@ -552,12 +552,6 @@ function RouteMapView({
     properties: {},
     geometry: { type: "LineString" as const, coordinates: displayRoutePath.map(([lat, lng]) => [lng, lat]) },
   };
-  const remainingLineGeoJson = {
-    type: "Feature" as const,
-    properties: {},
-    geometry: { type: "LineString" as const, coordinates: remainingRoute.map(([lat, lng]) => [lng, lat]) },
-  };
-
   return (
     <MapLibreMap
       initialViewState={{ longitude: center.lng, latitude: center.lat, zoom: 12 }}
@@ -580,8 +574,8 @@ function RouteMapView({
       }}
       onError={() => setMapError(true)}
     >
-      {remainingRoute.length > 1 && (
-        <Source id="route-line" type="geojson" data={remainingLineGeoJson}>
+      {displayRoutePath.length > 1 && (
+        <Source id="route-line" type="geojson" data={fullLineGeoJson}>
           <Layer
             id="route-line-casing"
             type="line"
