@@ -564,6 +564,20 @@ function RouteMapView({
       style={{ width: "100%", height }}
       mapStyle={MAP_STYLE}
       scrollZoom={false}
+      onLoad={event => {
+        const points = [
+          ...plotted.map(stop => [stop.lng!, stop.lat!] as [number, number]),
+          ...(busPosition ? [[busPosition.lng, busPosition.lat] as [number, number]] : []),
+        ];
+        if (points.length > 1) {
+          const longitudes = points.map(([longitude]) => longitude);
+          const latitudes = points.map(([, latitude]) => latitude);
+          event.target.fitBounds(
+            [[Math.min(...longitudes), Math.min(...latitudes)], [Math.max(...longitudes), Math.max(...latitudes)]],
+            { padding: 90, maxZoom: 14, duration: 0 },
+          );
+        }
+      }}
       onError={() => setMapError(true)}
     >
       {routePath.length > 1 && (
@@ -571,7 +585,7 @@ function RouteMapView({
           <Layer
             id="full-route-line"
             type="line"
-            paint={{ "line-color": "#B8C2CC", "line-width": 5, "line-opacity": 0.9 }}
+            paint={{ "line-color": "#FFFFFF", "line-width": 11, "line-opacity": 0.9 }}
             layout={{ "line-cap": "round", "line-join": "round" }}
           />
         </Source>
@@ -581,7 +595,7 @@ function RouteMapView({
           <Layer
             id="remaining-route-line"
             type="line"
-            paint={{ "line-color": C.blue, "line-width": 7, "line-opacity": 0.95 }}
+            paint={{ "line-color": C.blue, "line-width": 9, "line-opacity": 1 }}
             layout={{ "line-cap": "round", "line-join": "round" }}
           />
         </Source>
