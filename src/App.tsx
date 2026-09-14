@@ -174,6 +174,25 @@ const C = {
   muted:   "#8A96A3",
 };
 
+const MAP_STYLE = {
+  version: 8 as const,
+  sources: {
+    "openstreetmap-tiles": {
+      type: "raster" as const,
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
+  },
+  layers: [
+    {
+      id: "openstreetmap-tiles",
+      type: "raster" as const,
+      source: "openstreetmap-tiles",
+    },
+  ],
+};
+
 // ── Tiny icon set ─────────────────────────────────────────────────────────────
 const Ic = {
   home:    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>,
@@ -538,7 +557,7 @@ function RouteMapView({
     <MapLibreMap
       initialViewState={{ longitude: center.lng, latitude: center.lat, zoom: 12 }}
       style={{ width: "100%", height }}
-      mapStyle="https://tiles.openfreemap.org/styles/liberty"
+      mapStyle={MAP_STYLE}
       scrollZoom={false}
       onError={() => setMapError(true)}
     >
