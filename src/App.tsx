@@ -553,50 +553,18 @@ function RouteMapView({
         </Source>
       )}
       {plotted.map((s, i) => (
-        <MapLibreMarker
-          key={i}
-          longitude={s.lng!}
-          latitude={s.lat!}
-          anchor="bottom"
-        >
+        <MapLibreMarker key={i} longitude={s.lng!} latitude={s.lat!}>
           <div
             title={s.name}
             style={{
-              display:"flex",
-              flexDirection:"column",
-              alignItems:"center",
-              gap:4,
-              pointerEvents:"none",
+              width: 14,
+              height: 14,
+              borderRadius: "50%",
+              background: stopColor(s.state),
+              border: "2px solid #fff",
+              boxShadow: "0 0 0 1px rgba(0,0,0,0.25)",
             }}
-          >
-            <div style={{
-              maxWidth:150,
-              padding:"5px 8px",
-              borderRadius:7,
-              background:"rgba(255,255,255,0.97)",
-              border:`1px solid ${C.border}`,
-              boxShadow:"0 2px 8px rgba(0,0,0,0.18)",
-              color:C.text,
-              fontFamily:"Inter,sans-serif",
-              fontSize:11,
-              fontWeight:700,
-              lineHeight:1.15,
-              textAlign:"center",
-              whiteSpace:"nowrap",
-              overflow:"hidden",
-              textOverflow:"ellipsis",
-            }}>
-              {i + 1}. {s.name}
-            </div>
-            <div style={{
-              width:14,
-              height:14,
-              borderRadius:"50%",
-              background:stopColor(s.state),
-              border:"2px solid #fff",
-              boxShadow:"0 0 0 1px rgba(0,0,0,0.25)",
-            }} />
-          </div>
+          />
         </MapLibreMarker>
       ))}
       {busPosition && (
@@ -1310,31 +1278,14 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
                 </div>
 
                 {/* Stop content — admin `s.time` is intentionally NOT used */}
-                <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, padding:"10px 16px", borderRadius:12, background: s.state === "current" ? `${C.blue}08` : C.surface, border:`1px solid ${s.state === "current" ? `${C.blue}30` : C.border}` }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
-                    <div style={{
-                      minWidth:24,
-                      height:24,
-                      borderRadius:7,
-                      background:s.state === "current" ? C.blue : C.bg,
-                      color:s.state === "current" ? "#fff" : C.sub,
-                      border:`1px solid ${s.state === "current" ? C.blue : C.border}`,
-                      display:"flex",
-                      alignItems:"center",
-                      justifyContent:"center",
-                      fontSize:11,
-                      fontWeight:800,
-                    }}>
-                      {i + 1}
-                    </div>
-                    <div style={{ minWidth:0 }}>
-                      <div style={{ fontFamily:"Inter,sans-serif", fontWeight:600, fontSize:14, color:isPassed ? C.muted : C.text, textDecoration:isPassed ? "line-through" : "none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</div>
-                      {s.state === "current" && (
-                        <div style={{ fontSize:11, color:C.blue, fontWeight:700, marginTop:2 }}>
-                          ● Next Stop
-                        </div>
-                      )}
-                    </div>
+                <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 16px", borderRadius:12, background: s.state === "current" ? `${C.blue}08` : C.surface, border:`1px solid ${s.state === "current" ? `${C.blue}30` : C.border}` }}>
+                  <div>
+                    <div style={{ fontFamily:"Inter,sans-serif", fontWeight:600, fontSize:14, color: isPassed ? C.muted : C.text, textDecoration: isPassed ? "line-through" : "none" }}>{s.name}</div>
+                    {s.state === "current" && (
+                      <div style={{ fontSize:11, color:C.blue, fontWeight:700, marginTop:2 }}>
+                        ● Next Stop
+                      </div>
+                    )}
                   </div>
                   <div style={{ fontFamily:"Outfit,sans-serif", fontSize:13, fontWeight:700, color: isPassed ? C.muted : s.state === "current" ? C.blue : C.sub, textAlign:"right" }}>
                     {arrivalLabel}
@@ -1518,10 +1469,13 @@ function MakeStopScreen({ onNav, selectedBus }: { onNav: (s: Screen) => void; se
 
 // 10 ─ Notifications
 function NotificationsScreen({ onNav }: { onNav: (s: Screen) => void }) {
-  const [items, setItems] = useStoredState<Notification[]>(
-    "rit-notifications-r24-v2",
-    []
-  );
+  const [items, setItems] = useStoredState<Notification[]>("rit-notifications-r24", [
+    { icon:"🚌", title:"R24 is 2 stops away", time:"2 min ago",  dot:C.blue,   isNew:true  },
+    { icon:"✅", title:"Pickup request accepted",     time:"25 min ago", dot:C.live, isNew:false },
+    { icon:"🏗️", title:"New stop request approved",   time:"1 hr ago",   dot:C.live, isNew:false },
+    { icon:"🗺️", title:"R24 route updated",    time:"2 hr ago",   dot:C.sky,  isNew:false },
+    { icon:"▶️", title:"R24 trip has started",     time:"Yesterday",  dot:C.blue, isNew:false },
+  ]);
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported"
   );
@@ -1541,25 +1495,13 @@ function NotificationsScreen({ onNav }: { onNav: (s: Screen) => void }) {
         </div>
       </div>
       <div style={{ flex:1, overflowY:"auto", padding:"12px 20px 88px" }}>
-        {permission === "default" && (
+        {permission !== "granted" && permission !== "unsupported" && (
           <button onClick={enableNotifications} style={{ width:"100%", marginBottom:12, padding:"12px 14px", borderRadius:12, border:`1px solid ${C.blue}`, background:C.skyLight, color:C.blue, fontFamily:"Inter,sans-serif", fontSize:13, fontWeight:700, cursor:"pointer" }}>
-            🔔 Enable browser notifications
+            Enable browser notifications
           </button>
         )}
         {permission === "granted" && (
-          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.liveBg, color:C.live, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:700 }}>
-            ✓ Browser notifications enabled
-          </div>
-        )}
-        {permission === "denied" && (
-          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.warnBg, color:C.warn, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:600 }}>
-            Browser notifications are blocked. Allow notifications for this site in your browser settings.
-          </div>
-        )}
-        {permission === "unsupported" && (
-          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.bg, color:C.muted, fontFamily:"Inter,sans-serif", fontSize:12 }}>
-            Browser notifications are not supported in this browser.
-          </div>
+          <div style={{ marginBottom:12, color:C.live, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:600 }}>Browser notifications enabled</div>
         )}
         {items.map((n, i) => (
           <div key={i} style={{ display:"flex", gap:12, background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:"14px 16px", marginBottom:8, borderLeft:`3px solid ${n.isNew ? n.dot : C.border}`, animation:`slideInRight 0.3s ${i*0.05}s both` }}>
