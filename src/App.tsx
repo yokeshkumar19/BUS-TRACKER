@@ -1,8 +1,7 @@
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+import { Map as MapLibreMap, Marker as MapLibreMarker, Popup as MapLibrePopup, Source, Layer } from "react-map-gl/maplibre";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 import ritLogo from "@/imports/Logo2.jpeg";
 import {
@@ -372,27 +371,35 @@ function MapView({ height = 280 }: { animateBus?: boolean; height?: number }) {
 }
 
 // Free, no-API-key map that plots real checkpoints (route stops) and the live
-// bus position using OpenStreetMap tiles via Leaflet.
-const stopDivIcon = (state: "done" | "current" | "upcoming") =>
-  L.divIcon({
-    className: "",
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${
-      state === "current" ? "#2ECC71" : state === "done" ? "#9AA5AE" : C.blue
-    };border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,0.25)"></div>`,
-    iconSize: [14, 14],
-  });
+// bus position using MapLibre GL JS with OpenFreeMap vector tiles.
+function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const s1 = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s1), Math.sqrt(1 - s1));
+}
 
-const busDivIcon = L.divIcon({
-  className: "",
-  html: `<div style="font-size:22px;line-height:1;transform:translate(-3px,-3px)">🚌</div>`,
-  iconSize: [22, 22],
-});
+function bearingDegrees(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const φ1 = a.lat * Math.PI / 180, φ2 = b.lat * Math.PI / 180;
+  const λ1 = a.lng * Math.PI / 180, λ2 = b.lng * Math.PI / 180;
+  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
 
-const studentDivIcon = L.divIcon({
-  className: "",
-  html: `<div style="width:18px;height:18px;border-radius:50%;background:#E53935;border:3px solid #fff;box-shadow:0 0 0 2px rgba(229,57,53,0.25)"></div>`,
-  iconSize: [18, 18],
-});
+const stopColor = (state: "done" | "current" | "upcoming") =>
+  state === "current" ? "#2ECC71" : state === "done" ? "#9AA5AE" : C.blue;
+
+function BusMarkerIcon({ heading }: { heading: number }) {
+  return (
+    <div style={{ transform: `rotate(${heading}deg)`, transition: "transform 0.3s linear" }}>
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <polygon points="15,2 26,24 15,19 4,24" fill={C.blue} stroke="#fff" strokeWidth="2"/>
+      </svg>
+    </div>
+  );
+}
 
 const ARRIVED_METERS = 150;
 
@@ -406,7 +413,7 @@ function withLiveStopStates(
   let nearestDistance = Number.POSITIVE_INFINITY;
   stops.forEach((s, i) => {
     if (s.lat == null || s.lng == null) return;
-    const d = L.latLng(busPosition.lat, busPosition.lng).distanceTo([s.lat, s.lng]);
+    const d = distanceMeters(busPosition, { lat: s.lat, lng: s.lng });
     if (d < nearestDistance) { nearestDistance = d; nearestIndex = i; }
   });
   if (nearestIndex === -1) return stops;
@@ -441,22 +448,32 @@ function RouteMapView({
   const plotted = stops.filter(s => typeof s.lat === "number" && typeof s.lng === "number");
   const routeKey = plotted.map(s => `${s.lat},${s.lng}`).join(";");
   const [routePath, setRoutePath] = useState<[number, number][]>([]);
+  const prevPositionRef = useRef<{ lat: number; lng: number } | null>(null);
+  const [heading, setHeading] = useState(0);
+
+  useEffect(() => {
+    if (busPosition && prevPositionRef.current) {
+      const d = distanceMeters(prevPositionRef.current, busPosition);
+      if (d > 3) setHeading(bearingDegrees(prevPositionRef.current, busPosition));
+    }
+    if (busPosition) prevPositionRef.current = busPosition;
+  }, [busPosition?.lat, busPosition?.lng]);
+
   const midStop = plotted[Math.floor(plotted.length / 2)];
   const center = busPosition ?? (midStop ? { lat: midStop.lat!, lng: midStop.lng! } : { lat: 13.0072, lng: 79.6 });
+
   let nearestRouteIndex = -1;
   if (busPosition && routePath.length) {
     let nearestDistance = Number.POSITIVE_INFINITY;
     routePath.forEach(([lat, lng], index) => {
-      const distance = L.latLng(busPosition.lat, busPosition.lng).distanceTo([lat, lng]);
+      const distance = distanceMeters(busPosition, { lat, lng });
       if (distance < nearestDistance) {
         nearestDistance = distance;
         nearestRouteIndex = index;
       }
     });
   }
- const remainingRoute = nearestRouteIndex >= 0
-  ? routePath.slice(nearestRouteIndex)
-  : [];
+  const remainingRoute = nearestRouteIndex >= 0 ? routePath.slice(nearestRouteIndex) : [];
 
   useEffect(() => {
     if (plotted.length < 2) {
@@ -497,30 +514,112 @@ function RouteMapView({
     );
   }
 
+  const fullLineGeoJson = {
+    type: "Feature" as const,
+    properties: {},
+    geometry: { type: "LineString" as const, coordinates: routePath.map(([lat, lng]) => [lng, lat]) },
+  };
+  const remainingLineGeoJson = {
+    type: "Feature" as const,
+    properties: {},
+    geometry: { type: "LineString" as const, coordinates: remainingRoute.map(([lat, lng]) => [lng, lat]) },
+  };
+
   return (
-    <MapContainer center={[center.lat, center.lng]} zoom={12} style={{ width:"100%", height }} scrollWheelZoom={false}>
-      <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+    <MapLibreMap
+      initialViewState={{ longitude: center.lng, latitude: center.lat, zoom: 12 }}
+      style={{ width: "100%", height }}
+      mapStyle="https://tiles.openfreemap.org/styles/liberty"
+      scrollZoom={false}
+    >
       {routePath.length > 1 && (
-        <Polyline positions={routePath} color="#B8C2CC" weight={5} opacity={0.9} lineCap="round" lineJoin="round" />
+        <Source id="full-route" type="geojson" data={fullLineGeoJson}>
+          <Layer
+            id="full-route-line"
+            type="line"
+            paint={{ "line-color": "#B8C2CC", "line-width": 5, "line-opacity": 0.9 }}
+            layout={{ "line-cap": "round", "line-join": "round" }}
+          />
+        </Source>
       )}
       {remainingRoute.length > 1 && (
-  <Polyline positions={remainingRoute} color={C.blue} weight={7} opacity={0.95} lineCap="round" lineJoin="round" />
-)}
+        <Source id="remaining-route" type="geojson" data={remainingLineGeoJson}>
+          <Layer
+            id="remaining-route-line"
+            type="line"
+            paint={{ "line-color": C.blue, "line-width": 7, "line-opacity": 0.95 }}
+            layout={{ "line-cap": "round", "line-join": "round" }}
+          />
+        </Source>
+      )}
       {plotted.map((s, i) => (
-        <Marker key={i} position={[s.lat!, s.lng!]} icon={stopDivIcon(s.state)}>
-          <Popup>{s.name}</Popup>
-        </Marker>
+        <MapLibreMarker
+          key={i}
+          longitude={s.lng!}
+          latitude={s.lat!}
+          anchor="bottom"
+        >
+          <div
+            title={s.name}
+            style={{
+              display:"flex",
+              flexDirection:"column",
+              alignItems:"center",
+              gap:4,
+              pointerEvents:"none",
+            }}
+          >
+            <div style={{
+              maxWidth:150,
+              padding:"5px 8px",
+              borderRadius:7,
+              background:"rgba(255,255,255,0.97)",
+              border:`1px solid ${C.border}`,
+              boxShadow:"0 2px 8px rgba(0,0,0,0.18)",
+              color:C.text,
+              fontFamily:"Inter,sans-serif",
+              fontSize:11,
+              fontWeight:700,
+              lineHeight:1.15,
+              textAlign:"center",
+              whiteSpace:"nowrap",
+              overflow:"hidden",
+              textOverflow:"ellipsis",
+            }}>
+              {i + 1}. {s.name}
+            </div>
+            <div style={{
+              width:14,
+              height:14,
+              borderRadius:"50%",
+              background:stopColor(s.state),
+              border:"2px solid #fff",
+              boxShadow:"0 0 0 1px rgba(0,0,0,0.25)",
+            }} />
+          </div>
+        </MapLibreMarker>
       ))}
-      {busPosition && <Marker position={[busPosition.lat, busPosition.lng]} icon={busDivIcon}/>}
+      {busPosition && (
+        <MapLibreMarker longitude={busPosition.lng} latitude={busPosition.lat}>
+          <BusMarkerIcon heading={heading} />
+        </MapLibreMarker>
+      )}
       {studentLocations.map(student => (
-        <Marker key={student.id} position={[student.lat, student.lng]} icon={studentDivIcon}>
-          <Popup>
-            <strong>{student.studentName || "Student"}</strong>
-            <br />Pickup location shared
-          </Popup>
-        </Marker>
+        <MapLibreMarker key={student.id} longitude={student.lng} latitude={student.lat}>
+          <div
+            title={student.studentName || "Student"}
+            style={{
+              width: 18,
+              height: 18,
+              borderRadius: "50%",
+              background: "#E53935",
+              border: "3px solid #fff",
+              boxShadow: "0 0 0 2px rgba(229,57,53,0.25)",
+            }}
+          />
+        </MapLibreMarker>
       ))}
-    </MapContainer>
+    </MapLibreMap>
   );
 }
 
@@ -938,12 +1037,183 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
   );
 }   
 
+
+/**
+ * Uses the driver's live GPS position stored on the bus document.
+ * It deliberately does NOT use the admin-entered stop `time` field.
+ *
+ * ETA is calculated from the current bus position to the remaining stops
+ * using the road router, then converted into the actual arrival clock time.
+ */
+function formatArrivalTime(date: Date) {
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function getRouteProgressPercent(
+  stops: FireRouteStop[],
+  busPosition: { lat: number; lng: number } | null,
+) {
+  const plotted = stops.filter(
+    s => typeof s.lat === "number" && typeof s.lng === "number"
+  );
+
+  if (!busPosition || plotted.length < 2) return 0;
+
+  // Find the closest point on any stop-to-stop segment.
+  // This gives a smoother progress value than simply using the nearest stop.
+  let bestSegment = 0;
+  let bestT = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  const latScale = 111320;
+  const lngScale = 111320 * Math.cos(busPosition.lat * Math.PI / 180);
+
+  for (let i = 0; i < plotted.length - 1; i++) {
+    const a = plotted[i];
+    const b = plotted[i + 1];
+
+    const ax = (a.lng! - busPosition.lng) * lngScale;
+    const ay = (a.lat! - busPosition.lat) * latScale;
+    const bx = (b.lng! - busPosition.lng) * lngScale;
+    const by = (b.lat! - busPosition.lat) * latScale;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared > 0
+      ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / lengthSquared))
+      : 0;
+
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const distance = Math.sqrt(px * px + py * py);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestSegment = i;
+      bestT = t;
+    }
+  }
+
+  return Math.max(
+    0,
+    Math.min(100, ((bestSegment + bestT) / (plotted.length - 1)) * 100)
+  );
+}
+
+function useLiveStopArrivalTimes(
+  stops: FireRouteStop[],
+  busPosition: { lat: number; lng: number } | null,
+) {
+  const [arrivalTimes, setArrivalTimes] = useState<Record<number, number>>({});
+  const [now, setNow] = useState(() => Date.now());
+
+  const stopsKey = stops
+    .map(s => `${s.name}:${s.lat ?? ""},${s.lng ?? ""}`)
+    .join("|");
+
+  const busKey = busPosition
+    ? `${busPosition.lat},${busPosition.lng}`
+    : "";
+
+  // Keep the displayed clock genuinely current even when the bus GPS
+  // does not change for a short period.
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!busPosition || stops.length === 0) {
+      setArrivalTimes({});
+      return;
+    }
+
+    const liveStops = withLiveStopStates(stops, busPosition);
+    const currentIndex = liveStops.findIndex(s => s.state === "current");
+    const firstRemainingIndex =
+      currentIndex >= 0
+        ? currentIndex
+        : liveStops.findIndex(s => s.state !== "done");
+
+    if (firstRemainingIndex < 0) {
+      setArrivalTimes({});
+      return;
+    }
+
+    const remainingStops = liveStops.slice(firstRemainingIndex).filter(
+      s => typeof s.lat === "number" && typeof s.lng === "number"
+    );
+
+    if (remainingStops.length === 0) {
+      setArrivalTimes({});
+      return;
+    }
+
+    const controller = new AbortController();
+    const coordinates = [
+      `${busPosition.lng},${busPosition.lat}`,
+      ...remainingStops.map(s => `${s.lng},${s.lat}`),
+    ].join(";");
+
+    fetch(
+      `https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=false`,
+      { signal: controller.signal }
+    )
+      .then(response => {
+        if (!response.ok) throw new Error(`ETA request failed: ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const legs = Array.isArray(data.routes?.[0]?.legs)
+          ? data.routes[0].legs
+          : [];
+
+        let cumulativeSeconds = 0;
+        const next: Record<number, number> = {};
+
+        remainingStops.forEach((stop, offset) => {
+          const leg = legs[offset];
+          if (typeof leg?.duration !== "number") return;
+
+          cumulativeSeconds += leg.duration;
+          const originalIndex = liveStops.indexOf(stop);
+          if (originalIndex >= 0) {
+            next[originalIndex] = cumulativeSeconds;
+          }
+        });
+
+        setArrivalTimes(next);
+      })
+      .catch(error => {
+        if (error.name !== "AbortError") {
+          console.error("Unable to calculate live stop ETAs", error);
+          setArrivalTimes({});
+        }
+      });
+
+    return () => controller.abort();
+  }, [stopsKey, busKey]);
+
+  return { arrivalTimes, now };
+}
+
 // 6 ─ Route & Stops
 function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", assignedBus, selectedBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; backTo?: Screen; assignedBus?: FireBus; selectedBus?: FireBus }) {
   const myBus = selectedBus ?? assignedBus ?? buses[0] ?? EMPTY_BUS;
- const stops = myBus ? (stopsByRoute[myBus.r] ?? []) : [];
-  return (
+  const rawStops = myBus ? (stopsByRoute[myBus.r] ?? []) : [];
+  const busPosition =
+    myBus.lat != null && myBus.lng != null
+      ? { lat: myBus.lat, lng: myBus.lng }
+      : null;
 
+  // Stop status and the blue progress line are both driven by the
+  // driver's current GPS position.
+  const stops = withLiveStopStates(rawStops, busPosition);
+  const { arrivalTimes, now } = useLiveStopArrivalTimes(stops, busPosition);
+  const progressPercent = getRouteProgressPercent(stops, busPosition);
+
+  return (
     <div style={{ position:"absolute", inset:0, background:C.bg, display:"flex", flexDirection:"column" }}>
       <div style={{ background:C.surface, borderBottom:`1px solid ${C.border}` }}>
         <StatusBar/>
@@ -951,66 +1221,128 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
         <div style={{ padding:"0 20px 14px", display:"flex", alignItems:"center", gap:8 }}>
           <div style={{ width:32, height:32, borderRadius:8, background:C.blue, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:12 }}>{myBus.r}</div>
           <span style={{ fontFamily:"Inter,sans-serif", fontSize:13, color:C.sub }}>{myBus.routeName} · {stops.length} stops</span>
-          <LiveBadge small/>
+          {myBus.live ? <LiveBadge small/> : (
+            <span style={{ fontSize:10, fontWeight:700, color:C.muted }}>OFFLINE</span>
+          )}
           <button
-  onClick={() => onNav("live-map")}
-  style={{
-    position: "fixed",
-    right: 24,
-    bottom: 24,
-    height: 48,
-    padding: "0 20px",
-    borderRadius: 24,
-    border: "none",
-    background: C.blue,
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: "pointer",
-    boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
-    zIndex: 100,
-  }}
->
-  📍 Track Bus
-</button>
+            onClick={() => onNav("live-map")}
+            style={{
+              position: "fixed",
+              right: 24,
+              bottom: 24,
+              height: 48,
+              padding: "0 20px",
+              borderRadius: 24,
+              border: "none",
+              background: C.blue,
+              color: "#fff",
+              fontSize: 14,
+              fontWeight: 700,
+              cursor: "pointer",
+              boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
+              zIndex: 100,
+            }}
+          >
+            📍 Track Bus
+          </button>
         </div>
       </div>
 
       <div style={{ flex:1, overflowY:"auto", padding:"20px 24px 32px" }}>
+        {busPosition ? (
+          <div style={{ fontSize:11, color:C.live, fontWeight:700, marginBottom:12 }}>
+            ● Live GPS · arrivals update from the bus's current location
+          </div>
+        ) : (
+          <div style={{ fontSize:11, color:C.warn, fontWeight:700, marginBottom:12 }}>
+            Waiting for driver's live GPS location
+          </div>
+        )}
+
         <div style={{ position:"relative" }}>
-            {/* Track line */}
-            <div style={{ position:"absolute", left:10, top:10, bottom:10, width:2, background:C.border }}/>
-            {stops.length > 1 && (() => {
-              const doneCount = stops.filter(s => s.state === "done").length;
-              const currentIndex = stops.findIndex(s => s.state === "current");
-              const progressIndex = currentIndex >= 0 ? currentIndex : doneCount;
-              const progressPercent = (progressIndex / (stops.length - 1)) * 100;
-              return (
-                <div style={{ position:"absolute", left:10, top:10, width:2, height:`${progressPercent}%`, background:C.blue }}/>
-              );
-            })()}
-          {stops.map((s, i) => (
-            <div key={s.name} style={{ display:"flex", gap:20, marginBottom: i < stops.length-1 ? 24 : 0, alignItems:"center", animation:`fadeUp 0.3s ${i*0.07}s both` }}>
-              {/* Dot */}
-              <div style={{ flexShrink:0, width:22, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                {s.state === "done" ? (
-                  <div style={{ width:10, height:10, borderRadius:"50%", background:C.muted }}/>
-                ) : s.state === "current" ? (
-                  <div style={{ width:16, height:16, borderRadius:"50%", background:C.blue, border:"2px solid #fff", boxShadow:`0 0 0 3px ${C.blue}33` }}/>
-                ) : (
-                  <div style={{ width:10, height:10, borderRadius:"50%", background:"#fff", border:`2px solid ${C.border}` }}/>
-                )}
-              </div>
-              {/* Content */}
-              <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 16px", borderRadius:12, background: s.state === "current" ? `${C.blue}08` : C.surface, border:`1px solid ${s.state === "current" ? `${C.blue}30` : C.border}` }}>
-                <div>
-                  <div style={{ fontFamily:"Inter,sans-serif", fontWeight:600, fontSize:14, color: s.state === "done" ? C.muted : C.text, textDecoration: s.state === "done" ? "line-through" : "none" }}>{s.name}</div>
-                  {s.state === "current" && <div style={{ fontSize:11, color:C.blue, fontWeight:600, marginTop:2 }}>● Next Stop</div>}
+          {/* Full track line */}
+          <div style={{
+            position:"absolute",
+            left:10,
+            top:10,
+            bottom:10,
+            width:2,
+            background:C.border
+          }}/>
+
+          {/* Blue section = actual bus progress along the route */}
+          {stops.length > 1 && busPosition && progressPercent > 0 && (
+            <div style={{
+              position:"absolute",
+              left:10,
+              top:10,
+              width:2,
+              height:`calc(${progressPercent}% - ${progressPercent * 0.2}px)`,
+              background:C.blue,
+              transition:"height 0.8s ease"
+            }}/>
+          )}
+
+          {stops.map((s, i) => {
+            const seconds = arrivalTimes[i];
+            const isPassed = s.state === "done";
+            const arrivalLabel = isPassed
+              ? "Passed"
+              : typeof seconds === "number"
+                ? seconds < 60
+                  ? "Arriving now"
+                  : formatArrivalTime(new Date(now + seconds * 1000))
+                : busPosition
+                  ? "Calculating…"
+                  : "Waiting for GPS";
+
+            return (
+              <div key={`${s.name}-${i}`} style={{ display:"flex", gap:20, marginBottom: i < stops.length-1 ? 24 : 0, alignItems:"center", animation:`fadeUp 0.3s ${i*0.07}s both` }}>
+                {/* Dot */}
+                <div style={{ flexShrink:0, width:22, display:"flex", alignItems:"center", justifyContent:"center", zIndex:2 }}>
+                  {s.state === "done" ? (
+                    <div style={{ width:10, height:10, borderRadius:"50%", background:C.muted }}/>
+                  ) : s.state === "current" ? (
+                    <div style={{ width:16, height:16, borderRadius:"50%", background:C.blue, border:"2px solid #fff", boxShadow:`0 0 0 3px ${C.blue}33` }}/>
+                  ) : (
+                    <div style={{ width:10, height:10, borderRadius:"50%", background:"#fff", border:`2px solid ${C.border}` }}/>
+                  )}
                 </div>
-                <div style={{ fontFamily:"Outfit,sans-serif", fontSize:13, fontWeight:600, color: s.state === "done" ? C.muted : C.sub }}>{s.time}</div>
+
+                {/* Stop content — admin `s.time` is intentionally NOT used */}
+                <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, padding:"10px 16px", borderRadius:12, background: s.state === "current" ? `${C.blue}08` : C.surface, border:`1px solid ${s.state === "current" ? `${C.blue}30` : C.border}` }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+                    <div style={{
+                      minWidth:24,
+                      height:24,
+                      borderRadius:7,
+                      background:s.state === "current" ? C.blue : C.bg,
+                      color:s.state === "current" ? "#fff" : C.sub,
+                      border:`1px solid ${s.state === "current" ? C.blue : C.border}`,
+                      display:"flex",
+                      alignItems:"center",
+                      justifyContent:"center",
+                      fontSize:11,
+                      fontWeight:800,
+                    }}>
+                      {i + 1}
+                    </div>
+                    <div style={{ minWidth:0 }}>
+                      <div style={{ fontFamily:"Inter,sans-serif", fontWeight:600, fontSize:14, color:isPassed ? C.muted : C.text, textDecoration:isPassed ? "line-through" : "none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</div>
+                      {s.state === "current" && (
+                        <div style={{ fontSize:11, color:C.blue, fontWeight:700, marginTop:2 }}>
+                          ● Next Stop
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ fontFamily:"Outfit,sans-serif", fontSize:13, fontWeight:700, color: isPassed ? C.muted : s.state === "current" ? C.blue : C.sub, textAlign:"right" }}>
+                    {arrivalLabel}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -1186,13 +1518,10 @@ function MakeStopScreen({ onNav, selectedBus }: { onNav: (s: Screen) => void; se
 
 // 10 ─ Notifications
 function NotificationsScreen({ onNav }: { onNav: (s: Screen) => void }) {
-  const [items, setItems] = useStoredState<Notification[]>("rit-notifications-r24", [
-    { icon:"🚌", title:"R24 is 2 stops away", time:"2 min ago",  dot:C.blue,   isNew:true  },
-    { icon:"✅", title:"Pickup request accepted",     time:"25 min ago", dot:C.live, isNew:false },
-    { icon:"🏗️", title:"New stop request approved",   time:"1 hr ago",   dot:C.live, isNew:false },
-    { icon:"🗺️", title:"R24 route updated",    time:"2 hr ago",   dot:C.sky,  isNew:false },
-    { icon:"▶️", title:"R24 trip has started",     time:"Yesterday",  dot:C.blue, isNew:false },
-  ]);
+  const [items, setItems] = useStoredState<Notification[]>(
+    "rit-notifications-r24-v2",
+    []
+  );
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported"
   );
@@ -1212,13 +1541,25 @@ function NotificationsScreen({ onNav }: { onNav: (s: Screen) => void }) {
         </div>
       </div>
       <div style={{ flex:1, overflowY:"auto", padding:"12px 20px 88px" }}>
-        {permission !== "granted" && permission !== "unsupported" && (
+        {permission === "default" && (
           <button onClick={enableNotifications} style={{ width:"100%", marginBottom:12, padding:"12px 14px", borderRadius:12, border:`1px solid ${C.blue}`, background:C.skyLight, color:C.blue, fontFamily:"Inter,sans-serif", fontSize:13, fontWeight:700, cursor:"pointer" }}>
-            Enable browser notifications
+            🔔 Enable browser notifications
           </button>
         )}
         {permission === "granted" && (
-          <div style={{ marginBottom:12, color:C.live, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:600 }}>Browser notifications enabled</div>
+          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.liveBg, color:C.live, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:700 }}>
+            ✓ Browser notifications enabled
+          </div>
+        )}
+        {permission === "denied" && (
+          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.warnBg, color:C.warn, fontFamily:"Inter,sans-serif", fontSize:12, fontWeight:600 }}>
+            Browser notifications are blocked. Allow notifications for this site in your browser settings.
+          </div>
+        )}
+        {permission === "unsupported" && (
+          <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:10, background:C.bg, color:C.muted, fontFamily:"Inter,sans-serif", fontSize:12 }}>
+            Browser notifications are not supported in this browser.
+          </div>
         )}
         {items.map((n, i) => (
           <div key={i} style={{ display:"flex", gap:12, background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:"14px 16px", marginBottom:8, borderLeft:`3px solid ${n.isNew ? n.dot : C.border}`, animation:`slideInRight 0.3s ${i*0.05}s both` }}>
@@ -1466,6 +1807,7 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
   const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
   const remaining = stops.filter(s => s.state !== "done").length;
   const busPosition = position ? { lat: position.coords.latitude, lng: position.coords.longitude } : null;
+  const speedKmh = position?.coords.speed != null && position.coords.speed >= 0 ? Math.round(position.coords.speed * 3.6) : null;
   const sharedStudents: SharedStudentLocation[] = requests
     .filter(r => {
       const data = r as any;
@@ -1520,7 +1862,7 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
             <LiveBadge/>
           </div>
           <div style={{ width:44, height:44, borderRadius:12, background:"rgba(13,27,42,0.88)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", color:"#fff" }}>
-            <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:14, lineHeight:1 }}>34</div>
+            <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:14, lineHeight:1 }}>{speedKmh ?? "—"}</div>
             <div style={{ fontSize:9, color:"rgba(255,255,255,0.4)" }}>km/h</div>
           </div>
         </div>

@@ -35,6 +35,10 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       watch: { ignored: ['**/.figma/**'] },
     },
+    optimizeDeps: {
+    exclude: ['maplibre-gl'],
+  },
+
     preview: {
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
