@@ -485,15 +485,18 @@ function RouteMapView({
 
   const midStop = plotted[Math.floor(plotted.length / 2)];
   const center = busPosition ?? (midStop ? { lat: midStop.lat!, lng: midStop.lng! } : { lat: 13.0072, lng: 79.6 });
+  const displayRoutePath = routePath.length > 1
+    ? routePath
+    : plotted.map(stop => [stop.lat!, stop.lng!] as [number, number]);
 
   if (mapError) {
     return <MapView height={height} />;
   }
 
   let nearestRouteIndex = -1;
-  if (busPosition && routePath.length) {
+  if (busPosition && displayRoutePath.length) {
     let nearestDistance = Number.POSITIVE_INFINITY;
-    routePath.forEach(([lat, lng], index) => {
+    displayRoutePath.forEach(([lat, lng], index) => {
       const distance = distanceMeters(busPosition, { lat, lng });
       if (distance < nearestDistance) {
         nearestDistance = distance;
@@ -501,7 +504,9 @@ function RouteMapView({
       }
     });
   }
-  const remainingRoute = nearestRouteIndex >= 0 ? routePath.slice(nearestRouteIndex) : [];
+  const remainingRoute = busPosition
+    ? (nearestRouteIndex >= 0 ? displayRoutePath.slice(nearestRouteIndex) : [])
+    : displayRoutePath;
 
   useEffect(() => {
     if (plotted.length < 2) {
@@ -545,7 +550,7 @@ function RouteMapView({
   const fullLineGeoJson = {
     type: "Feature" as const,
     properties: {},
-    geometry: { type: "LineString" as const, coordinates: routePath.map(([lat, lng]) => [lng, lat]) },
+    geometry: { type: "LineString" as const, coordinates: displayRoutePath.map(([lat, lng]) => [lng, lat]) },
   };
   const remainingLineGeoJson = {
     type: "Feature" as const,
@@ -586,14 +591,41 @@ function RouteMapView({
           <div
             title={s.name}
             style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 4,
+              pointerEvents: "none",
+            }}
+          >
+            <div style={{
+              maxWidth: 150,
+              padding: "5px 8px",
+              borderRadius: 7,
+              background: "rgba(255,255,255,0.97)",
+              border: `1px solid ${C.border}`,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.18)",
+              color: C.text,
+              fontFamily: "Inter,sans-serif",
+              fontSize: 11,
+              fontWeight: 700,
+              lineHeight: 1.15,
+              textAlign: "center",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}>
+              {i + 1}. {s.name}
+            </div>
+            <div style={{
               width: 14,
               height: 14,
               borderRadius: "50%",
               background: stopColor(s.state),
               border: "2px solid #fff",
               boxShadow: "0 0 0 1px rgba(0,0,0,0.25)",
-            }}
-          />
+            }} />
+          </div>
         </MapLibreMarker>
       ))}
       {busPosition && (
