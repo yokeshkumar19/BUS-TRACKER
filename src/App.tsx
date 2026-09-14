@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { Map as MapLibreMap, Marker as MapLibreMarker, Popup as MapLibrePopup, Source, Layer } from "react-map-gl/maplibre";
+import { Map as MapLibreMap, Marker as MapLibreMarker, Popup as MapLibrePopup, Source, Layer, useMap } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import ritLogo from "@/imports/Logo2.jpeg";
@@ -457,6 +457,41 @@ type SharedStudentLocation = {
   studentEmail?: string;
 };
 
+function RouteOverlay({ path }: { path: [number, number][] }) {
+  const { current: map } = useMap();
+  const [screenPoints, setScreenPoints] = useState("");
+
+  useEffect(() => {
+    if (!map || path.length < 2) {
+      setScreenPoints("");
+      return;
+    }
+
+    const update = () => {
+      setScreenPoints(path.map(([lat, lng]) => {
+        const point = map.project({ lat, lng });
+        return `${point.x},${point.y}`;
+      }).join(" "));
+    };
+
+    update();
+    map.on("move", update);
+    map.on("resize", update);
+    return () => {
+      map.off("move", update);
+      map.off("resize", update);
+    };
+  }, [map, path]);
+
+  if (!screenPoints) return null;
+  return (
+    <svg aria-hidden="true" style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", zIndex:1 }}>
+      <polyline points={screenPoints} fill="none" stroke="#fff" strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points={screenPoints} fill="none" stroke={C.blue} strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function RouteMapView({
   stops,
   busPosition,
@@ -574,6 +609,7 @@ function RouteMapView({
       }}
       onError={() => setMapError(true)}
     >
+      <RouteOverlay path={displayRoutePath} />
       {displayRoutePath.length > 1 && (
         <Source id="route-line" type="geojson" data={fullLineGeoJson}>
           <Layer
