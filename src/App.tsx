@@ -457,7 +457,7 @@ type SharedStudentLocation = {
   studentEmail?: string;
 };
 
-function RouteOverlay({ path }: { path: [number, number][] }) {
+function RouteOverlay({ path, remainingPath }: { path: [number, number][]; remainingPath: [number, number][] }) {
   const { current: map } = useMap();
   const [screenPoints, setScreenPoints] = useState("");
 
@@ -483,11 +483,16 @@ function RouteOverlay({ path }: { path: [number, number][] }) {
     };
   }, [map, path]);
 
+  const remainingScreenPoints = remainingPath.map(([lat, lng]) => {
+    const point = map?.project({ lat, lng });
+    return point ? `${point.x},${point.y}` : "";
+  }).filter(Boolean).join(" ");
+
   if (!screenPoints) return null;
   return (
     <svg aria-hidden="true" style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", zIndex:1 }}>
       <polyline points={screenPoints} fill="none" stroke="#fff" strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" />
-      <polyline points={screenPoints} fill="none" stroke={C.blue} strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />
+      {remainingScreenPoints && <polyline points={remainingScreenPoints} fill="none" stroke={C.blue} strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />}
     </svg>
   );
 }
@@ -609,7 +614,7 @@ function RouteMapView({
       }}
       onError={() => setMapError(true)}
     >
-      <RouteOverlay path={displayRoutePath} />
+      <RouteOverlay path={displayRoutePath} remainingPath={remainingRoute} />
       {displayRoutePath.length > 1 && (
         <Source id="route-line" type="geojson" data={fullLineGeoJson}>
           <Layer
@@ -1014,7 +1019,7 @@ const stops = withLiveStopStates(stopsByRoute[bus.r] ?? [], busPosition);
       </div>
 
       {/* Bottom sheet */}
-      <div style={{ position:"absolute", bottom:0, left:0, right:0, background:C.surface, borderRadius:"24px 24px 0 0", boxShadow:"0 -4px 24px rgba(0,0,0,0.10)", animation:"slideUp 0.3s ease" }}>
+      <div style={{ position:"absolute", bottom:0, left:0, right:0, zIndex:1200, background:C.surface, borderRadius:"24px 24px 0 0", boxShadow:"0 -4px 24px rgba(0,0,0,0.10)", animation:"slideUp 0.3s ease" }}>
         <div style={{ width:36, height:4, borderRadius:2, background:C.border, margin:"12px auto 0" }}/>
         <div style={{ padding:"12px 20px 32px" }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
