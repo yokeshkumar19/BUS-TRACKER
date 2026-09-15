@@ -416,9 +416,9 @@ const stopColor = (state: "done" | "current" | "upcoming") =>
 
 function BusMarkerIcon({ heading }: { heading: number }) {
   return (
-    <div style={{ transform: `rotate(${heading}deg)`, transition: "transform 0.3s linear" }}>
-      <svg width="30" height="30" viewBox="0 0 30 30">
-        <polygon points="15,2 26,24 15,19 4,24" fill={C.blue} stroke="#fff" strokeWidth="2"/>
+    <div style={{ position: "relative", zIndex: 20, transform: `translateY(-3px) rotate(${heading}deg)`, transition: "transform 0.3s linear", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
+      <svg width="40" height="40" viewBox="0 0 40 40">
+        <polygon points="20,2 36,33 20,26 4,33" fill={C.blue} stroke="#fff" strokeWidth="2.5"/>
       </svg>
     </div>
   );
