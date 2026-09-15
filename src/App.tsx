@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect,useMemo, useRef, useState } from "react";
 import { Map as MapLibreMap, Marker as MapLibreMarker, Popup as MapLibrePopup, Source, Layer, useMap } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -397,6 +397,10 @@ function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: 
   const dLng = (b.lng - a.lng) * Math.PI / 180;
   const s1 = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(s1), Math.sqrt(1 - s1));
+}
+function formatDistance(meters: number): string {
+  if (meters < 1000) return `${Math.round(meters)} m`;
+  return `${(meters / 1000).toFixed(1)} km`;
 }
 
 function bearingDegrees(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
@@ -2822,7 +2826,17 @@ export default function App() {
   const routeSubs = useRef<Record<string, () => void>>({});
   const previousBuses = useRef<FireBus[] | null>(null);
   const previousStopRequests = useRef<FireStopRequest[] | null>(null);
+const { position: myPosition } = useGeolocation();
 
+const busesWithDistance = useMemo(() => {
+  if (!myPosition) return buses;
+  const me = { lat: myPosition.coords.latitude, lng: myPosition.coords.longitude };
+  return buses.map(bus => {
+    if (!validCoordinate(bus.lat) || !validCoordinate(bus.lng)) return bus;
+    const meters = distanceMeters(me, { lat: bus.lat, lng: bus.lng });
+    return { ...bus, dist: formatDistance(meters) };
+  });
+}, [buses, myPosition]);
   useEffect(() => {
     const unsubBuses = subscribeBuses(setBuses);
     const unsubRequests = subscribeStopRequests(setStopRequests);
@@ -2908,8 +2922,7 @@ export default function App() {
       }
     });
   }, [buses]);
-
-  const selectedBus = buses.find((bus) => bus.id === selectedBusId) ?? buses[0];
+const selectedBus = busesWithDistance.find((bus) => bus.id === selectedBusId) ?? busesWithDistance[0];
 
   useEffect(() => {
     if (!selectedBusId && buses[0]) setSelectedBusId(buses[0].id);
@@ -2987,7 +3000,7 @@ export default function App() {
         <StudentHome
           onNav={nav}
           user={user}
-          buses={buses}
+          buses={busesWithDistance}
           stopsByRoute={stopsByRoute}
           onSelectBus={setSelectedBusId}
         />
@@ -3005,7 +3018,7 @@ export default function App() {
         {screen === "route-stops" && (
   <RouteStopsScreen
     onNav={nav}
-    buses={buses}
+    buses={busesWithDistance}
     stopsByRoute={stopsByRoute}
     assignedBus={assignedBus}
     selectedBus={selectedBus}
@@ -3015,7 +3028,7 @@ export default function App() {
         
 
         {screen === "find-bus" && (
-          <FindBusScreen onNav={nav} buses={buses} onSelectBus={setSelectedBusId} />
+          <FindBusScreen onNav={nav} buses={busesWithDistance} onSelectBus={setSelectedBusId} />
         )}
 
         {screen === "stop-here" && (
