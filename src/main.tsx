@@ -7,6 +7,12 @@ import './index.css'
 class AppErrorBoundary extends React.Component<React.PropsWithChildren, { error: Error | null }> {
   state = { error: null as Error | null }
 
+  recover = () => {
+    localStorage.removeItem('rit-screen')
+    const separator = window.location.search ? '&' : '?'
+    window.location.replace(`${window.location.pathname}${window.location.search}${separator}recover=${Date.now()}`)
+  }
+
   static getDerivedStateFromError(error: Error) {
     return { error }
   }
@@ -19,7 +25,7 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, { error:
         <div>
           <h1 style={{ margin: '0 0 8px', fontSize: 22 }}>The app needs to reload</h1>
           <p style={{ margin: '0 0 18px', color: '#4A5568' }}>A temporary error stopped this screen from loading.</p>
-          <button onClick={() => window.location.reload()} style={{ border: 0, borderRadius: 10, padding: '12px 18px', background: '#1565C0', color: '#fff', fontWeight: 700 }}>Reload</button>
+          <button onClick={this.recover} style={{ border: 0, borderRadius: 10, padding: '12px 18px', background: '#1565C0', color: '#fff', fontWeight: 700 }}>Reload</button>
         </div>
       </main>
     )
