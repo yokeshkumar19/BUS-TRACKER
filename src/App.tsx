@@ -2842,10 +2842,14 @@ export default function App() {
     buses.forEach(bus => {
       const oldBus = previous.find(item => item.id === bus.id);
       if (!oldBus || oldBus.live === bus.live) return;
-      new Notification(bus.live ? `${bus.r} trip started` : `${bus.r} trip ended`, {
-        body: bus.live ? `${bus.routeName} is now live.` : `${bus.routeName} is no longer live.`,
-        icon: ritLogo,
-      });
+      try {
+  new Notification(bus.live ? `${bus.r} trip started` : `${bus.r} trip ended`, {
+    body: bus.live ? `${bus.routeName} is now live.` : `${bus.routeName} is no longer live.`,
+    icon: ritLogo,
+  });
+} catch (err) {
+  console.warn("Notification unsupported on this browser", err);
+}
     });
   }, [buses]);
 
@@ -2867,10 +2871,14 @@ export default function App() {
       const matchesDriver = data.targetDriverEmail && assignedBus.driverEmail && data.targetDriverEmail.toLowerCase() === assignedBus.driverEmail.toLowerCase();
       const matchesRoute = data.route === assignedBus.r;
       if (isLocationShare && matchesDriver && matchesRoute && !oldIds.has(String(data.id ?? "")) && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Student location shared", {
-          body: `${data.studentName || "A student"} shared a pickup location for ${assignedBus.r}.`,
-          icon: ritLogo,
-        });
+        try {
+  new Notification("Student location shared", {
+    body: `${data.studentName || "A student"} shared a pickup location for ${assignedBus.r}.`,
+    icon: ritLogo,
+  });
+} catch (err) {
+  console.warn("Notification unsupported on this browser", err);
+}
       }
     });
   }, [stopRequests, role, assignedBus]);
