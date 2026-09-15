@@ -1842,6 +1842,7 @@ function DriverStartTrip({ onNav, assignedBus }: { onNav: (s: Screen) => void; a
 // 15 ─ Driver Live Map
 function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = [] }: { onNav: (s: Screen) => void; busId: string; stopsByRoute: Record<string, FireRouteStop[]>; assignedBus?: FireBus; requests?: FireStopRequest[] }) {
   const [req, setReq] = useState(true);
+  const [endingTrip, setEndingTrip] = useState(false);
   const { position } = useGeolocation();
   const stops =
   assignedBus
@@ -1871,6 +1872,29 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
       };
     });
   const etaMinutes = useRealEta(busPosition, nextStop);
+
+  function endTrip() {
+    if (endingTrip) return;
+    setEndingTrip(true);
+
+    try {
+      const active = localStorage.getItem("rit-active-trip");
+      const trips = JSON.parse(localStorage.getItem("rit-trips-r24") || "[]") as Trip[];
+      if (active) {
+        const trip = JSON.parse(active) as Trip;
+        localStorage.setItem("rit-trips-r24", JSON.stringify([{ ...trip, status: "Completed" }, ...trips]));
+        localStorage.removeItem("rit-active-trip");
+      }
+    } catch (error) {
+      console.error("Unable to save completed trip", error);
+      localStorage.removeItem("rit-active-trip");
+    }
+
+    if (busId) {
+      setBusLive(busId, false).catch(error => console.error("Unable to end trip in Firestore", error));
+    }
+    onNav("driver-home");
+  }
 
   // Push the driver's real GPS position to Firestore every time it updates,
   // so every student watching the map sees the bus move live.
@@ -1940,18 +1964,8 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
               </div>
             ))}
           </div>
-          <button onClick={() => {
-            const active = localStorage.getItem("rit-active-trip");
-            if (active) {
-              const trip = JSON.parse(active) as Trip;
-              const trips = JSON.parse(localStorage.getItem("rit-trips-r24") || "[]") as Trip[];
-              localStorage.setItem("rit-trips-r24", JSON.stringify([{ ...trip, status: "Completed" }, ...trips]));
-              localStorage.removeItem("rit-active-trip");
-            }
-            setBusLive(busId, false).catch(console.error);
-            onNav("driver-home");
-          }} style={{ width:"100%", height:48, borderRadius:12, background:"#E53935", color:"#fff", border:"none", fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:16, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
-            {Ic.stop} End Trip
+          <button onClick={endTrip} disabled={endingTrip} style={{ width:"100%", height:48, borderRadius:12, background:endingTrip ? C.muted : "#E53935", color:"#fff", border:"none", fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:16, cursor:endingTrip ? "not-allowed" : "pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            {Ic.stop} {endingTrip ? "Ending…" : "End Trip"}
           </button>
         </div>
       </div>
