@@ -420,7 +420,7 @@ const stopColor = (state: "done" | "current" | "upcoming") =>
 
 function BusMarkerIcon({ heading }: { heading: number }) {
   return (
-    <div style={{ position: "relative", zIndex: 20, transform: `translateY(-3px) rotate(${heading}deg)`, transition: "transform 0.3s linear", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
+    <div style={{ position: "relative", zIndex: 20, transform: "translateY(-3px)", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
       <svg width="40" height="40" viewBox="0 0 40 40">
         <polygon points="20,2 36,33 20,26 4,33" fill={C.blue} stroke="#fff" strokeWidth="2.5"/>
       </svg>
@@ -428,7 +428,86 @@ function BusMarkerIcon({ heading }: { heading: number }) {
   );
 }
 
-const ARRIVED_METERS = 150;
+// Stop status is based on the bus crossing the ordered checkpoint.
+// It is NOT based on the nearest stop and there is no arrival-radius shortcut.
+// The route is treated as an ordered chain of checkpoints. The bus is projected
+// onto that chain and a stop becomes "done" only after the projected position
+// has moved beyond that checkpoint.
+function getOrderedRouteProgress(
+  stops: FireRouteStop[],
+  busPosition: { lat: number; lng: number } | null,
+): number | null {
+  if (!busPosition) return null;
+
+  const plotted = stops
+    .map((stop, originalIndex) => ({ stop, originalIndex }))
+    .filter(({ stop }) => validCoordinate(stop.lat) && validCoordinate(stop.lng));
+
+  if (plotted.length < 2) return null;
+
+  const latScale = 111320;
+  const lngScale = 111320 * Math.cos(busPosition.lat * Math.PI / 180);
+
+  // Build the route using real metre lengths, rather than treating every
+  // stop-to-stop section as the same length.
+  const cumulative: number[] = [0];
+  for (let i = 1; i < plotted.length; i++) {
+    const a = plotted[i - 1].stop;
+    const b = plotted[i].stop;
+    const dx = (b.lng! - a.lng!) * lngScale;
+    const dy = (b.lat! - a.lat!) * latScale;
+    cumulative[i] = cumulative[i - 1] + Math.hypot(dx, dy);
+  }
+
+  const totalLength = cumulative[cumulative.length - 1];
+  if (totalLength <= 0) return 0;
+
+  // Project the live GPS point onto the closest ordered route segment.
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestRouteDistance = 0;
+
+  for (let i = 0; i < plotted.length - 1; i++) {
+    const a = plotted[i].stop;
+    const b = plotted[i + 1].stop;
+
+    const ax = (a.lng! - busPosition.lng) * lngScale;
+    const ay = (a.lat! - busPosition.lat) * latScale;
+    const bx = (b.lng! - busPosition.lng) * lngScale;
+    const by = (b.lat! - busPosition.lat) * latScale;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0
+      ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2))
+      : 0;
+
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const distanceFromRoute = Math.hypot(px, py);
+    const segmentLength = Math.sqrt(len2);
+
+    if (distanceFromRoute < bestDistance) {
+      bestDistance = distanceFromRoute;
+      bestRouteDistance = cumulative[i] + segmentLength * t;
+    }
+  }
+
+  // If the bus is beyond the final checkpoint, complete the whole route.
+  const last = plotted[plotted.length - 1].stop;
+  const previous = plotted[plotted.length - 2].stop;
+  const vx = (last.lng! - previous.lng!) * lngScale;
+  const vy = (last.lat! - previous.lat!) * latScale;
+  const wx = (busPosition.lng - previous.lng!) * lngScale;
+  const wy = (busPosition.lat - previous.lat!) * latScale;
+  const finalLen2 = vx * vx + vy * vy;
+
+  if (finalLen2 > 0 && wx * vx + wy * vy >= finalLen2) {
+    bestRouteDistance = totalLength;
+  }
+
+  return Math.max(0, Math.min(totalLength, bestRouteDistance));
+}
 
 function withLiveStopStates(
   stops: FireRouteStop[],
@@ -436,20 +515,57 @@ function withLiveStopStates(
 ): FireRouteStop[] {
   if (!busPosition) return stops;
 
-  let nearestIndex = -1;
-  let nearestDistance = Number.POSITIVE_INFINITY;
-  stops.forEach((s, i) => {
-    if (s.lat == null || s.lng == null) return;
-    const d = distanceMeters(busPosition, { lat: s.lat, lng: s.lng });
-    if (d < nearestDistance) { nearestDistance = d; nearestIndex = i; }
-  });
-  if (nearestIndex === -1) return stops;
+  const plotted = stops
+    .map((stop, originalIndex) => ({ stop, originalIndex }))
+    .filter(({ stop }) => validCoordinate(stop.lat) && validCoordinate(stop.lng));
 
-  const currentIndex = nearestDistance <= ARRIVED_METERS ? nearestIndex + 1 : nearestIndex;
-  return stops.map((s, i) => ({
-    ...s,
-    state: i < currentIndex ? "done" : i === currentIndex ? "current" : "upcoming",
-  }));
+  // Without coordinates there is no safe way to decide whether a checkpoint
+  // has actually been crossed. Keep the admin order instead of guessing.
+  if (plotted.length < 2) return stops;
+
+  const progressMeters = getOrderedRouteProgress(stops, busPosition);
+  if (progressMeters == null) return stops;
+
+  const cumulative: number[] = [0];
+  for (let i = 1; i < plotted.length; i++) {
+    cumulative[i] = cumulative[i - 1] + distanceMeters(
+      { lat: plotted[i - 1].stop.lat!, lng: plotted[i - 1].stop.lng! },
+      { lat: plotted[i].stop.lat!, lng: plotted[i].stop.lng! },
+    );
+  }
+
+  // A checkpoint is considered passed only once the bus has crossed its
+  // ordered route position. No 150 m "nearby" rule is used.
+  const EPSILON_METERS = 0.5;
+  const passedPlottedCount = cumulative.filter(
+    checkpointDistance => progressMeters > checkpointDistance + EPSILON_METERS,
+  ).length;
+
+  const plottedIndexByOriginalIndex = new Map<number, number>();
+  plotted.forEach(({ originalIndex }, index) => {
+    plottedIndexByOriginalIndex.set(originalIndex, index);
+  });
+
+  let currentAssigned = false;
+
+  return stops.map((stop, originalIndex) => {
+    const plottedIndex = plottedIndexByOriginalIndex.get(originalIndex);
+
+    if (plottedIndex == null) {
+      return { ...stop, state: stop.state ?? "upcoming" };
+    }
+
+    if (plottedIndex < passedPlottedCount) {
+      return { ...stop, state: "done" };
+    }
+
+    if (!currentAssigned) {
+      currentAssigned = true;
+      return { ...stop, state: "current" };
+    }
+
+    return { ...stop, state: "upcoming" };
+  });
 }
 
 
@@ -494,7 +610,7 @@ function RouteOverlay({ path, remainingPath }: { path: [number, number][]; remai
 
   if (!screenPoints) return null;
   return (
-    <svg aria-hidden="true" style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", zIndex:1 }}>
+    <svg aria-hidden="true" style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", zIndex:0 }}>
       <polyline points={screenPoints} fill="none" stroke="#fff" strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" />
       {remainingScreenPoints && <polyline points={remainingScreenPoints} fill="none" stroke={C.blue} strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />}
     </svg>
@@ -636,7 +752,7 @@ function RouteMapView({
         </Source>
       )}
       {plotted.map((s, i) => (
-        <MapLibreMarker key={i} longitude={s.lng!} latitude={s.lat!}>
+        <MapLibreMarker key={i} longitude={s.lng!} latitude={s.lat!} style={{ zIndex: 10 }}>
           <div
             title={s.name}
             style={{
@@ -654,7 +770,7 @@ function RouteMapView({
               background: "rgba(255,255,255,0.97)",
               border: `1px solid ${C.border}`,
               boxShadow: "0 2px 8px rgba(0,0,0,0.18)",
-              color: C.text,
+              color: s.state === "done" ? C.muted : C.text,
               fontFamily: "Inter,sans-serif",
               fontSize: 11,
               fontWeight: 700,
@@ -663,6 +779,7 @@ function RouteMapView({
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              textDecoration: s.state === "done" ? "line-through" : "none",
             }}>
               {i + 1}. {s.name}
             </div>
@@ -678,7 +795,7 @@ function RouteMapView({
         </MapLibreMarker>
       ))}
       {busPosition && (
-        <MapLibreMarker longitude={busPosition.lng} latitude={busPosition.lat}>
+        <MapLibreMarker longitude={busPosition.lng} latitude={busPosition.lat} style={{ zIndex: 20 }}>
           <BusMarkerIcon heading={heading} />
         </MapLibreMarker>
       )}
@@ -1853,13 +1970,16 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
   const [req, setReq] = useState(true);
   const [endingTrip, setEndingTrip] = useState(false);
   const { position } = useGeolocation();
-  const stops =
+  const rawStops =
   assignedBus
     ? (stopsByRoute[assignedBus.r] ?? [])
     : [];
-  const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
-  const remaining = stops.filter(s => s.state !== "done").length;
   const busPosition = position ? { lat: position.coords.latitude, lng: position.coords.longitude } : null;
+  // Compute done/current/upcoming from the driver's live GPS so passed
+  // checkpoints show as struck-through on the map, same as the student view.
+  const stops = withLiveStopStates(rawStops, busPosition);
+  const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
+  const remaining = stops.reduce((count, stop) => count + (stop.state === "done" ? 0 : 1), 0);
   const speedKmh = position?.coords.speed != null && position.coords.speed >= 0 ? Math.round(position.coords.speed * 3.6) : null;
   const sharedStudents: SharedStudentLocation[] = requests
     .filter(r => {
@@ -2829,11 +2949,15 @@ export default function App() {
 const { position: myPosition } = useGeolocation();
 
 const busesWithDistance = useMemo(() => {
+  // Student distance is always calculated from the student's live GPS
+  // position directly to the live bus position. It does NOT use the nearest
+  // route stop, stop time, or admin-entered stop distance.
   if (!myPosition) return buses;
-  const me = { lat: myPosition.coords.latitude, lng: myPosition.coords.longitude };
+  const studentPosition = { lat: myPosition.coords.latitude, lng: myPosition.coords.longitude };
+
   return buses.map(bus => {
     if (!validCoordinate(bus.lat) || !validCoordinate(bus.lng)) return bus;
-    const meters = distanceMeters(me, { lat: bus.lat, lng: bus.lng });
+    const meters = distanceMeters(studentPosition, { lat: bus.lat, lng: bus.lng });
     return { ...bus, dist: formatDistance(meters) };
   });
 }, [buses, myPosition]);
