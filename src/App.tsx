@@ -955,18 +955,29 @@ function StudentHome({
   stopsByRoute: Record<string, FireRouteStop[]>;
   onSelectBus: (id: string) => void;
 }) {
-  const [selectedId, setSelectedId] = useState<string>(buses[0]?.id ?? "");
+  // Do not automatically select the first bus. Restore only a bus that the
+  // student explicitly selected previously.
+  const [selectedId, setSelectedId] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem("selectedBusId") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [sharing, setSharing] = useState(false);
   const [shared, setShared] = useState(false);
 
   useEffect(() => {
-    if (!buses.some(b => b.id === selectedId) && buses[0]) {
-      setSelectedId(buses[0].id);
-      onSelectBus(buses[0].id);
+    // If the previously selected bus was deleted/unavailable, clear the
+    // selection instead of silently selecting the first bus.
+    if (selectedId && buses.length && !buses.some(b => b.id === selectedId)) {
+      setSelectedId("");
+      onSelectBus("");
+      try { sessionStorage.removeItem("selectedBusId"); } catch {}
     }
   }, [buses, selectedId, onSelectBus]);
 
-  const selectedBus = buses.find(b => b.id === selectedId) ?? buses[0];
+  const selectedBus = buses.find(b => b.id === selectedId);
 
   async function shareLocation() {
     if (!selectedBus) {
@@ -3136,11 +3147,25 @@ const busesWithDistance = useMemo(() => {
       }
     });
   }, [buses]);
-const selectedBus = busesWithDistance.find((bus) => bus.id === selectedBusId) ?? busesWithDistance[0];
+const selectedBus = busesWithDistance.find((bus) => bus.id === selectedBusId);
 
+  // Restore only the bus explicitly selected by the student. Never default
+  // to buses[0], because that makes the first bus look permanently selected.
   useEffect(() => {
-    if (!selectedBusId && buses[0]) setSelectedBusId(buses[0].id);
-    if (selectedBusId && buses.length && !buses.some(b => b.id === selectedBusId)) setSelectedBusId(buses[0].id);
+    if (!selectedBusId) {
+      try {
+        const stored = sessionStorage.getItem("selectedBusId");
+        if (stored && buses.some(b => b.id === stored)) {
+          setSelectedBusId(stored);
+        }
+      } catch {}
+      return;
+    }
+
+    if (buses.length && !buses.some(b => b.id === selectedBusId)) {
+      setSelectedBusId(null);
+      try { sessionStorage.removeItem("selectedBusId"); } catch {}
+    }
   }, [buses, selectedBusId]);
 
   function nav(to: Screen) {
