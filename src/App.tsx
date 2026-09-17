@@ -32,6 +32,24 @@ type Screen =
   | "admin-home" | "admin-stops" | "admin-manage";
 
 type Role = "student" | "driver" | "admin";
+type TripDirection = "outbound" | "return";
+
+function getTripDirection(bus?: FireBus): TripDirection {
+  return (bus as any)?.direction === "return" ? "return" : "outbound";
+}
+
+function getDirectionalStops(stops: FireRouteStop[], bus?: FireBus): FireRouteStop[] {
+  return getTripDirection(bus) === "return" ? [...stops].reverse() : stops;
+}
+
+function getDirectionalRouteName(routeName?: string, direction: TripDirection = "outbound") {
+  if (!routeName || direction === "outbound") return routeName || "—";
+  const arrowParts = routeName.split(/\s*(?:→|->)\s*/);
+  if (arrowParts.length === 2) return `${arrowParts[1]} → ${arrowParts[0]}`;
+  const toParts = routeName.split(/\s+to\s+/i);
+  if (toParts.length === 2) return `${toParts[1]} → ${toParts[0]}`;
+  return `${routeName} · Return`;
+}
 // Empty fallbacks — prevents fake demo data
 const FALLBACK_BUSES: FireBus[] = [];
 
@@ -1105,7 +1123,8 @@ function StudentHome({
 function LiveMapScreen({ onNav, buses, stopsByRoute, selectedBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; selectedBus?: FireBus }) {
   const bus = selectedBus ?? buses[0] ?? EMPTY_BUS;
   const busPosition = validCoordinate(bus.lat) && validCoordinate(bus.lng) ? { lat: bus.lat!, lng: bus.lng! } : null;
-const stops = withLiveStopStates(stopsByRoute[bus.r] ?? [], busPosition);
+  const tripDirection = getTripDirection(bus);
+  const stops = withLiveStopStates(getDirectionalStops(stopsByRoute[bus.r] ?? [], bus), busPosition);
   const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
   const etaMinutes = useRealEta(busPosition, nextStop);
 
@@ -1149,11 +1168,18 @@ const stops = withLiveStopStates(stopsByRoute[bus.r] ?? [], busPosition);
                 <div style={{ width:36, height:36, borderRadius:9, background:C.blue, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"Outfit,sans-serif", fontWeight:800, fontSize:13 }}>{bus.r}</div>
                 <div>
                   <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:16, color:C.text }}>{bus.r}</div>
-                  <div style={{ fontFamily:"Inter,sans-serif", fontSize:12, color:C.sub }}>{bus.routeName}</div>
+                  <div style={{ fontFamily:"Inter,sans-serif", fontSize:12, color:C.sub }}>
+                    {getDirectionalRouteName(bus.routeName, tripDirection)}
+                  </div>
                 </div>
               </div>
             </div>
-            {bus.live ? <LiveBadge/> : <span style={{ fontSize:11, color:C.muted, fontFamily:"Inter,sans-serif" }}>Offline</span>}
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              {tripDirection === "return" && (
+                <span style={{ fontSize:10, fontWeight:800, color:C.warn, background:C.warnBg, borderRadius:20, padding:"3px 8px" }}>RETURN</span>
+              )}
+              {bus.live ? <LiveBadge/> : <span style={{ fontSize:11, color:C.muted, fontFamily:"Inter,sans-serif" }}>Offline</span>}
+            </div>
           </div>
 
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:16 }}>
@@ -1181,7 +1207,11 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
   const statusText = bus.live ? "LIVE" : "OFFLINE";
   const busPosition = bus.lat != null && bus.lng != null ? { lat: bus.lat, lng: bus.lng } : null;
   const routeStops = stopsByRoute[bus.r];
-  const stops = withLiveStopStates(routeStops?.length ? routeStops : FALLBACK_STOPS, busPosition);
+  const tripDirection = getTripDirection(bus);
+  const stops = withLiveStopStates(
+    getDirectionalStops(routeStops?.length ? routeStops : FALLBACK_STOPS, bus),
+    busPosition
+  );
   return (
     <div style={{ position:"absolute", inset:0, background:C.bg, display:"flex", flexDirection:"column" }}>
       <div style={{ background:C.surface, borderBottom:`1px solid ${C.border}` }}>
@@ -1195,7 +1225,9 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
               <div style={{ width:50, height:50, borderRadius:13, background:C.blue, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:20 }}>🚌</div>
               <div>
                 <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:800, fontSize:20, color:C.text }}>{bus.n || "Bus"}</div>
-                <div style={{ fontFamily:"Inter,sans-serif", fontSize:12, color:C.sub, marginTop:3 }}>{bus.routeName || bus.r || "No route"}</div>
+                <div style={{ fontFamily:"Inter,sans-serif", fontSize:12, color:C.sub, marginTop:3 }}>
+                  {getDirectionalRouteName(bus.routeName || bus.r, tripDirection)}
+                </div>
               </div>
             </div>
             {bus.live ? <LiveBadge/> : <span style={{ fontSize:11, fontWeight:700, color:C.muted }}>{statusText}</span>}
@@ -1397,6 +1429,8 @@ function useLiveStopArrivalTimes(
 function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", assignedBus, selectedBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; backTo?: Screen; assignedBus?: FireBus; selectedBus?: FireBus }) {
   const myBus = selectedBus ?? assignedBus ?? buses[0] ?? EMPTY_BUS;
   const rawStops = myBus ? (stopsByRoute[myBus.r] ?? []) : [];
+  const tripDirection = getTripDirection(myBus);
+  const orderedStops = getDirectionalStops(rawStops, myBus);
   const busPosition =
     myBus.lat != null && myBus.lng != null
       ? { lat: myBus.lat, lng: myBus.lng }
@@ -1404,7 +1438,7 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
 
   // Stop status and the blue progress line are both driven by the
   // driver's current GPS position.
-  const stops = withLiveStopStates(rawStops, busPosition);
+  const stops = withLiveStopStates(orderedStops, busPosition);
   const { arrivalTimes, now } = useLiveStopArrivalTimes(stops, busPosition);
   const progressPercent = getRouteProgressPercent(stops, busPosition);
 
@@ -1415,7 +1449,12 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
         <TopBar title="Route & Stops" onBack={() => onNav(backTo)}/>
         <div style={{ padding:"0 20px 14px", display:"flex", alignItems:"center", gap:8 }}>
           <div style={{ width:32, height:32, borderRadius:8, background:C.blue, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:12 }}>{myBus.r}</div>
-          <span style={{ fontFamily:"Inter,sans-serif", fontSize:13, color:C.sub }}>{myBus.routeName} · {stops.length} stops</span>
+          <span style={{ fontFamily:"Inter,sans-serif", fontSize:13, color:C.sub }}>
+            {getDirectionalRouteName(myBus.routeName, tripDirection)} · {stops.length} stops
+          </span>
+          {tripDirection === "return" && (
+            <span style={{ fontSize:10, fontWeight:800, color:C.warn, background:C.warnBg, borderRadius:20, padding:"3px 8px" }}>RETURN</span>
+          )}
           {myBus.live ? <LiveBadge small/> : (
             <span style={{ fontSize:10, fontWeight:700, color:C.muted }}>OFFLINE</span>
           )}
@@ -1970,14 +2009,40 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
   const [req, setReq] = useState(true);
   const [endingTrip, setEndingTrip] = useState(false);
   const { position } = useGeolocation();
-  const rawStops =
-  assignedBus
+  // Return-trip direction is stored on the bus document, so every student's
+  // screen receives the same direction through the live bus subscription.
+  const [isReturnTrip, setIsReturnTrip] = useState<TripDirection>(
+    getTripDirection(assignedBus)
+  );
+
+  useEffect(() => {
+    setIsReturnTrip(getTripDirection(assignedBus));
+  }, [(assignedBus as any)?.direction]);
+
+  const rawStops = assignedBus
     ? (stopsByRoute[assignedBus.r] ?? [])
     : [];
+  const orderedStops = getDirectionalStops(rawStops, assignedBus);
+
+  async function toggleTripDirection() {
+    if (!busId) return;
+    const nextDirection: TripDirection =
+      isReturnTrip === "return" ? "outbound" : "return";
+
+    setIsReturnTrip(nextDirection);
+
+    try {
+      await updateBus(busId, { direction: nextDirection } as any);
+    } catch (error) {
+      console.error("Unable to update trip direction", error);
+      setIsReturnTrip(getTripDirection(assignedBus));
+    }
+  }
+
   const busPosition = position ? { lat: position.coords.latitude, lng: position.coords.longitude } : null;
   // Compute done/current/upcoming from the driver's live GPS so passed
   // checkpoints show as struck-through on the map, same as the student view.
-  const stops = withLiveStopStates(rawStops, busPosition);
+  const stops = withLiveStopStates(orderedStops, busPosition);
   const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming") ?? stops[0];
   const remaining = stops.reduce((count, stop) => count + (stop.state === "done" ? 0 : 1), 0);
   const speedKmh = position?.coords.speed != null && position.coords.speed >= 0 ? Math.round(position.coords.speed * 3.6) : null;
@@ -2050,10 +2115,35 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
             {Ic.back}
             <span>Back</span>
           </button>
+          <button
+            aria-label="Toggle return trip direction"
+            title="Flip stop order for the return trip"
+            onClick={toggleTripDirection}
+            style={{
+              height: 44,
+              padding: "0 14px",
+              borderRadius: 12,
+              background: isReturnTrip === "return" ? "#C84B11" : "rgba(13,27,42,0.94)",
+              border: "1px solid rgba(255,255,255,0.18)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              color: "#fff",
+              fontFamily: "Inter,sans-serif",
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: "pointer",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.24)",
+            }}
+          >
+            <span>{isReturnTrip === "return" ? "↩ Returning" : "↪ Return"}</span>
+          </button>
           <div style={{ flex:1, background:"rgba(13,27,42,0.88)", backdropFilter:"blur(8px)", borderRadius:12, padding:"10px 16px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
             <div>
               <div style={{ fontFamily:"Inter,sans-serif", fontSize:11, color:"rgba(255,255,255,0.5)" }}>Active Trip · {assignedBus?.r ?? "—"}</div>
-              <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:14, color:"#fff" }}>{assignedBus?.routeName ?? "—"}</div>
+              <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:700, fontSize:14, color:"#fff" }}>
+                {getDirectionalRouteName(assignedBus?.routeName, isReturnTrip)}
+              </div>
             </div>
             <LiveBadge/>
           </div>
