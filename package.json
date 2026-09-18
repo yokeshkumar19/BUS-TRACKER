@@ -10,6 +10,10 @@
     "format": "oxfmt"
   },
   "dependencies": {
+    "@capacitor-community/background-geolocation": "^1.2.26",
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
     "firebase": "^12.19.0",
     "maplibre-gl": "^6.9.0",
     "react": "^19.0.0",

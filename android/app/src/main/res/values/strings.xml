@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BUS TRACKER</string>
+    <string name="title_activity_main">BUS TRACKER</string>
+    <string name="package_name">com.rit.bustracker</string>
+    <string name="custom_url_scheme">com.rit.bustracker</string>
+</resources>
