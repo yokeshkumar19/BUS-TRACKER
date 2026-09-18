@@ -759,6 +759,16 @@ function RouteMapView({
   height?: number;
 }) {
   const [mapError, setMapError] = useState(false);
+  const [stableBusPosition, setStableBusPosition] = useState<{
+  lat: number;
+  lng: number;
+} | null>(busPosition ?? null);
+
+useEffect(() => {
+  if (busPosition) {
+    setStableBusPosition(busPosition);
+  }
+}, [busPosition?.lat, busPosition?.lng]);
   const plotted = stops.filter(s => validCoordinate(s.lat) && validCoordinate(s.lng));
   const routeKey = plotted.map(s => `${s.lat},${s.lng}`).join(";");
   const visibleStudentLocations = studentLocations.filter((student) =>
@@ -927,15 +937,27 @@ function RouteMapView({
           </div>
         </MapLibreMarker>
       ))}
-      {busPosition && (
+      {stableBusPosition && (
       <MapLibreMarker
-  longitude={busPosition.lng}
-  latitude={busPosition.lat}
-  style={{ zIndex: 20 }}
+  longitude={stableBusPosition.lng}
+  latitude={stableBusPosition.lat}
+  style={{
+    zIndex: 20,
+    transform: "rotate(0deg)",
+    transformOrigin: "center center",
+  }}
   rotationAlignment="viewport"
   pitchAlignment="viewport"
 >
-  <BusMarkerIcon heading={heading} />
+  <div
+    style={{
+      transform: "rotate(0deg)",
+      transformOrigin: "center center",
+      pointerEvents: "none",
+    }}
+  >
+    <BusMarkerIcon heading={0} />
+  </div>
 </MapLibreMarker>
       )}
       {visibleStudentLocations.map(student => (
