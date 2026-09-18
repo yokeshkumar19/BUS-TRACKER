@@ -931,23 +931,11 @@ function RouteMapView({
       <MapLibreMarker
   longitude={busPosition.lng}
   latitude={busPosition.lat}
-  style={{
-    zIndex: 20,
-    transform: "rotate(0deg)",
-    transformOrigin: "center center",
-  }}
+  style={{ zIndex: 20 }}
   rotationAlignment="viewport"
   pitchAlignment="viewport"
 >
-  <div
-    style={{
-      transform: "rotate(0deg)",
-      transformOrigin: "center center",
-      pointerEvents: "none",
-    }}
-  >
-    <BusMarkerIcon heading={0} />
-  </div>
+  <BusMarkerIcon heading={heading} />
 </MapLibreMarker>
       )}
       {visibleStudentLocations.map(student => (
