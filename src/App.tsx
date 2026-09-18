@@ -108,6 +108,10 @@ function nowLabel() {
   return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+async function enableBrowserNotifications() {
+  if (!("Notification" in window)) return "unsupported" as const;
+  return Notification.requestPermission();
+}
 
 function nameFromEmail(email: string) {
   const localPart = email.split("@")[0].replace(/[._-]+/g, " ").replace(/\d+/g, " ").trim();
@@ -180,6 +184,8 @@ function useDriverBackgroundLocation(): GeolocationPosition | null {
 } as GeolocationPosition;
 
 setPosition(newPosition);
+
+              setPosition(newPosition);
             }
           );
 
@@ -532,7 +538,7 @@ function validCoordinate(value: unknown): value is number {
 const stopColor = (state: "done" | "current" | "upcoming") =>
   state === "current" ? "#2ECC71" : state === "done" ? "#9AA5AE" : C.blue;
 
-function BusMarkerIcon({ heading: _heading }: { heading: number }) {
+function BusMarkerIcon({ heading }: { heading: number }) {
   return (
     <div style={{ position: "relative", zIndex: 20, transform: "translateY(-3px)", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
       <svg width="40" height="40" viewBox="0 0 40 40">
@@ -731,22 +737,6 @@ function RouteOverlay({ path, remainingPath }: { path: [number, number][]; remai
   );
 }
 
-function hasBusPassedLocation(
-  stops: FireRouteStop[],
-  busPosition: { lat: number; lng: number } | null,
-  location: { lat: number; lng: number },
-): boolean {
-  if (!busPosition || stops.length < 2) return false;
-
-  const busProgress = getOrderedRouteProgress(stops, busPosition);
-  if (busProgress == null) return false;
-
-  const pickupProgress = getOrderedRouteProgress(stops, location);
-  if (pickupProgress == null) return false;
-
-  return busProgress > pickupProgress + 15;
-}
-
 function RouteMapView({
   stops,
   busPosition,
@@ -759,21 +749,8 @@ function RouteMapView({
   height?: number;
 }) {
   const [mapError, setMapError] = useState(false);
-  const [stableBusPosition, setStableBusPosition] = useState<{
-  lat: number;
-  lng: number;
-} | null>(busPosition ?? null);
-
-useEffect(() => {
-  if (busPosition) {
-    setStableBusPosition(busPosition);
-  }
-}, [busPosition?.lat, busPosition?.lng]);
   const plotted = stops.filter(s => validCoordinate(s.lat) && validCoordinate(s.lng));
   const routeKey = plotted.map(s => `${s.lat},${s.lng}`).join(";");
-  const visibleStudentLocations = studentLocations.filter((student) =>
-    !hasBusPassedLocation(stops, busPosition ?? null, { lat: student.lat, lng: student.lng })
-  );
   const [routePath, setRoutePath] = useState<[number, number][]>([]);
   const prevPositionRef = useRef<{ lat: number; lng: number } | null>(null);
   const [heading, setHeading] = useState(0);
@@ -937,30 +914,12 @@ useEffect(() => {
           </div>
         </MapLibreMarker>
       ))}
-      {stableBusPosition && (
-      <MapLibreMarker
-  longitude={stableBusPosition.lng}
-  latitude={stableBusPosition.lat}
-  style={{
-    zIndex: 20,
-    transform: "rotate(0deg)",
-    transformOrigin: "center center",
-  }}
-  rotationAlignment="viewport"
-  pitchAlignment="viewport"
->
-  <div
-    style={{
-      transform: "rotate(0deg)",
-      transformOrigin: "center center",
-      pointerEvents: "none",
-    }}
-  >
-    <BusMarkerIcon heading={0} />
-  </div>
-</MapLibreMarker>
+      {busPosition && (
+        <MapLibreMarker longitude={busPosition.lng} latitude={busPosition.lat} style={{ zIndex: 20 }}>
+          <BusMarkerIcon heading={heading} />
+        </MapLibreMarker>
       )}
-      {visibleStudentLocations.map(student => (
+      {studentLocations.map(student => (
         <MapLibreMarker key={student.id} longitude={student.lng} latitude={student.lat}>
           <div
             title={student.studentName || "Student"}
@@ -1889,18 +1848,32 @@ function MakeStopScreen({ onNav, selectedBus }: { onNav: (s: Screen) => void; se
 
 // 10 ─ Notifications
 function NotificationsScreen({ onNav }: { onNav: (s: Screen) => void }) {
+  const [items, setItems] = useState<Notification[]>([]);
+ 
+
+ 
+
   return (
     <div style={{ position:"absolute", inset:0, background:C.bg, display:"flex", flexDirection:"column" }}>
       <div style={{ background:C.surface, borderBottom:`1px solid ${C.border}` }}>
         <StatusBar/>
-        <div style={{ padding:"4px 20px 14px" }}>
+        <div style={{ padding:"4px 20px 14px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
           <div style={{ fontFamily:"Outfit,sans-serif", fontWeight:800, fontSize:20, color:C.text }}>Notifications</div>
+          <button onClick={() => setItems(i => i.map(x => ({ ...x, isNew: false })))} style={{ fontSize:13, color:C.blue, fontFamily:"Inter,sans-serif", fontWeight:500, border:"none", background:"none", cursor:"pointer" }}>Mark all read</button>
         </div>
       </div>
       <div style={{ flex:1, overflowY:"auto", padding:"12px 20px 88px" }}>
-        <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:"28px 20px", color:C.sub, fontFamily:"Inter,sans-serif", fontSize:14, textAlign:"center" }}>
-          No notifications
-        </div>
+       
+        {items.map((n, i) => (
+          <div key={i} style={{ display:"flex", gap:12, background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:"14px 16px", marginBottom:8, borderLeft:`3px solid ${n.isNew ? n.dot : C.border}`, animation:`slideInRight 0.3s ${i*0.05}s both` }}>
+            <div style={{ width:38, height:38, borderRadius:10, background:C.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>{n.icon}</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontFamily:"Inter,sans-serif", fontWeight:600, fontSize:14, color:C.text, marginBottom:3 }}>{n.title}</div>
+              <div style={{ fontFamily:"Inter,sans-serif", fontSize:12, color:C.muted }}>{n.time}</div>
+            </div>
+            {n.isNew && <div style={{ width:7, height:7, borderRadius:"50%", background:C.blue, flexShrink:0, marginTop:4 }}/>}
+          </div>
+        ))}
       </div>
       <BottomNav active="notifications" onNav={onNav}/>
     </div>
@@ -2087,7 +2060,7 @@ function DriverStartTrip({ onNav, assignedBus }: { onNav: (s: Screen) => void; a
   const [done, setDone]       = useState(false);
 
   function start() {
-   
+    
     setLoading(true);
     setTimeout(() => { setDone(true); setTimeout(() => onNav("driver-live"), 1000); }, 1400);
     const trip: Trip = { bus: assignedBus?.r ?? "—", from: assignedBus?.routeName?.split("→")[0]?.trim() ?? "—", to: assignedBus?.routeName?.split("→")[1]?.trim() ?? "—", date: `Today, ${nowLabel()}`, status: "In progress" };
@@ -3184,12 +3157,54 @@ const busesWithDistance = useMemo(() => {
     };
   }, []);
 
+  useEffect(() => {
+    const previous = previousBuses.current;
+    previousBuses.current = buses;
+    if (!previous || !("Notification" in window) || Notification.permission !== "granted") return;
+
+    buses.forEach(bus => {
+      const oldBus = previous.find(item => item.id === bus.id);
+      if (!oldBus || oldBus.live === bus.live) return;
+      try {
+  new Notification(bus.live ? `${bus.r} trip started` : `${bus.r} trip ended`, {
+    body: bus.live ? `${bus.routeName} is now live.` : `${bus.routeName} is no longer live.`,
+    icon: ritLogo,
+  });
+} catch (err) {
+  console.warn("Notification unsupported on this browser", err);
+}
+    });
+  }, [buses]);
 
   // Which bus (if any) the currently logged-in driver is assigned to.
   const assignedBus = buses.find(
     (b) => b.driverEmail && user.email && b.driverEmail.toLowerCase() === user.email.toLowerCase()
   );
 
+  // Notify the currently logged-in driver when a student shares a location.
+  useEffect(() => {
+    const previous = previousStopRequests.current;
+    previousStopRequests.current = stopRequests;
+    if (!previous || role !== "driver" || !assignedBus) return;
+
+    const oldIds = new Set(previous.map(r => String((r as any).id ?? "")));
+    stopRequests.forEach(request => {
+      const data = request as any;
+      const isLocationShare = data.kind === "student-location" && data.locationShared === true;
+      const matchesDriver = data.targetDriverEmail && assignedBus.driverEmail && data.targetDriverEmail.toLowerCase() === assignedBus.driverEmail.toLowerCase();
+      const matchesRoute = data.route === assignedBus.r;
+      if (isLocationShare && matchesDriver && matchesRoute && !oldIds.has(String(data.id ?? "")) && "Notification" in window && Notification.permission === "granted") {
+        try {
+  new Notification("Student location shared", {
+    body: `${data.studentName || "A student"} shared a pickup location for ${assignedBus.r}.`,
+    icon: ritLogo,
+  });
+} catch (err) {
+  console.warn("Notification unsupported on this browser", err);
+}
+      }
+    });
+  }, [stopRequests, role, assignedBus]);
 
   // Every route currently in use gets its own live stop-list subscription —
   // added when a bus first uses that route, removed if no bus uses it anymore.
