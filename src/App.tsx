@@ -185,7 +185,7 @@ function useDriverBackgroundLocation(): GeolocationPosition | null {
 
 setPosition(newPosition);
 
-              setPosition(newPosition);
+             
             }
           );
 
