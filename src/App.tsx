@@ -138,101 +138,98 @@ function useGeolocation() {
 
   return { position, available };
 }
-function useDriverBackgroundLocation(): GeolocationPosition | null {
+/**
+ * Driver GPS tracking.
+ * - Runs only while `active` is true (trip in progress), independent of which
+ *   screen is showing, so pressing Back no longer kills tracking.
+ * - Uploads to Firestore directly inside the GPS callback. It does NOT wait for
+ *   a React render/effect, which Android throttles when the app is backgrounded.
+ */
+function useDriverBackgroundLocation(busId: string, active: boolean): GeolocationPosition | null {
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
+  const busIdRef = useRef(busId);
+  useEffect(() => { busIdRef.current = busId; }, [busId]);
 
   useEffect(() => {
+    if (!active) return;
+
+    let cancelled = false;
     let watcherId: string | null = null;
     let browserWatchId: number | null = null;
 
-    const startTracking = async () => {
-      if (Capacitor.isNativePlatform()) {
-        try {
-          watcherId = await BackgroundGeolocation.addWatcher(
-            {
-              backgroundTitle: "RIT BusTrack",
-              backgroundMessage: "Bus location tracking is active",
-              requestPermissions: true,
-              stale: false,
-              distanceFilter: 10,
-            },
-            (location, error) => {
-              if (error) {
-                console.error("Background GPS error:", error);
-                return;
-              }
-
-              if (!location) return;
-
-              const newPosition = {
-  coords: {
-    latitude: location.latitude,
-    longitude: location.longitude,
-    accuracy: location.accuracy,
-    altitude: location.altitude ?? null,
-    altitudeAccuracy: location.altitudeAccuracy ?? null,
-    heading: location.bearing ?? null,
-    speed: location.speed ?? null,
-    toJSON() {
-      return this;
-    },
-  },
-  timestamp: location.time ?? Date.now(),
-  toJSON() {
-    return this;
-  },
-} as GeolocationPosition;
-
-setPosition(newPosition);
-
-             
-            }
-          );
-
-          console.log("Native background GPS started");
-        } catch (error) {
-          console.error("Unable to start background GPS:", error);
-        }
-
-        return;
+    const push = (lat: number, lng: number) => {
+      if (busIdRef.current) {
+        updateBusLocation(busIdRef.current, lat, lng).catch(err =>
+          console.error("Firestore location upload failed:", err)
+        );
       }
-
-      // Browser fallback
-      if (!navigator.geolocation) {
-        console.error("Geolocation is not supported");
-        return;
-      }
-
-      browserWatchId = navigator.geolocation.watchPosition(
-        (newPosition) => {
-          setPosition(newPosition);
-        },
-        (error) => {
-          console.error("Browser GPS error:", error);
-        },
-        {
-          enableHighAccuracy: true,
-          maximumAge: 10000,
-        }
-      );
     };
 
-    startTracking();
+    if (Capacitor.isNativePlatform()) {
+      BackgroundGeolocation.addWatcher(
+        {
+          backgroundTitle: "RIT BusTrack",
+          backgroundMessage: "Bus location tracking is active",
+          requestPermissions: true,
+          stale: false,
+          distanceFilter: 10,
+        },
+        (location, error) => {
+          if (error) {
+            console.error("Background GPS error:", error);
+            return;
+          }
+          if (!location) return;
+
+          push(location.latitude, location.longitude);
+
+          const newPosition = {
+            coords: {
+              latitude: location.latitude,
+              longitude: location.longitude,
+              accuracy: location.accuracy,
+              altitude: location.altitude ?? null,
+              altitudeAccuracy: location.altitudeAccuracy ?? null,
+              heading: location.bearing ?? null,
+              speed: location.speed ?? null,
+              toJSON() { return this; },
+            },
+            timestamp: location.time ?? Date.now(),
+            toJSON() { return this; },
+          } as GeolocationPosition;
+          setPosition(newPosition);
+        }
+      )
+        .then(id => {
+          // If the trip ended before addWatcher resolved, remove it right away.
+          if (cancelled) BackgroundGeolocation.removeWatcher({ id }).catch(console.error);
+          else watcherId = id;
+        })
+        .catch(error => console.error("Unable to start background GPS:", error));
+    } else if (navigator.geolocation) {
+      // Browser fallback
+      browserWatchId = navigator.geolocation.watchPosition(
+        p => {
+          push(p.coords.latitude, p.coords.longitude);
+          setPosition(p);
+        },
+        error => console.error("Browser GPS error:", error),
+        { enableHighAccuracy: true, maximumAge: 10000 }
+      );
+    } else {
+      console.error("Geolocation is not supported");
+    }
 
     return () => {
+      cancelled = true;
       if (watcherId !== null) {
-        BackgroundGeolocation.removeWatcher({
-          id: watcherId,
-        }).catch(console.error);
+        BackgroundGeolocation.removeWatcher({ id: watcherId }).catch(console.error);
       }
-
-      if (browserWatchId !== null) {
-        navigator.geolocation.clearWatch(browserWatchId);
-      }
+      if (browserWatchId !== null) navigator.geolocation.clearWatch(browserWatchId);
     };
-  }, []);
+  }, [active]);
 
-  return position;
+  return active ? position : null;
 }
 
 function useRealEta(
@@ -2055,7 +2052,7 @@ function DriverHome({ onNav, onLogout, user, assignedBus }: { onNav: (s: Screen)
 }
 
 // 14 ─ Start Trip
-function DriverStartTrip({ onNav, assignedBus }: { onNav: (s: Screen) => void; assignedBus?: FireBus }) {
+function DriverStartTrip({ onNav, assignedBus, onTripStart }: { onNav: (s: Screen) => void; assignedBus?: FireBus; onTripStart: () => void }) {
   const [loading, setLoading] = useState(false);
   const [done, setDone]       = useState(false);
 
@@ -2065,6 +2062,8 @@ function DriverStartTrip({ onNav, assignedBus }: { onNav: (s: Screen) => void; a
     setTimeout(() => { setDone(true); setTimeout(() => onNav("driver-live"), 1000); }, 1400);
     const trip: Trip = { bus: assignedBus?.r ?? "—", from: assignedBus?.routeName?.split("→")[0]?.trim() ?? "—", to: assignedBus?.routeName?.split("→")[1]?.trim() ?? "—", date: `Today, ${nowLabel()}`, status: "In progress" };
     localStorage.setItem("rit-active-trip", JSON.stringify(trip));
+    if (assignedBus?.id) setBusLive(assignedBus.id, true).catch(err => console.error("Unable to mark bus live", err));
+    onTripStart(); // starts background GPS tracking (owned by App)
   }
 
   return (
@@ -2100,10 +2099,9 @@ function DriverStartTrip({ onNav, assignedBus }: { onNav: (s: Screen) => void; a
 }
 
 // 15 ─ Driver Live Map
-function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = [] }: { onNav: (s: Screen) => void; busId: string; stopsByRoute: Record<string, FireRouteStop[]>; assignedBus?: FireBus; requests?: FireStopRequest[] }) {
+function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = [], position, onTripEnd }: { onNav: (s: Screen) => void; busId: string; stopsByRoute: Record<string, FireRouteStop[]>; assignedBus?: FireBus; requests?: FireStopRequest[]; position: GeolocationPosition | null; onTripEnd: () => void }) {
   const [req, setReq] = useState(true);
   const [endingTrip, setEndingTrip] = useState(false);
-  const position  = useDriverBackgroundLocation();
   // Return-trip direction is stored on the bus document, so every student's
   // screen receives the same direction through the live bus subscription.
   const [isReturnTrip, setIsReturnTrip] = useState<TripDirection>(
@@ -2182,16 +2180,9 @@ function DriverLiveScreen({ onNav, busId, stopsByRoute, assignedBus, requests = 
     if (busId) {
       setBusLive(busId, false).catch(error => console.error("Unable to end trip in Firestore", error));
     }
+    onTripEnd(); // stops background GPS tracking (owned by App)
     onNav("driver-home");
   }
-
-  // Push the driver's real GPS position to Firestore every time it updates,
-  // so every student watching the map sees the bus move live.
-  useEffect(() => {
-    if (position && busId) {
-      updateBusLocation(busId, position.coords.latitude, position.coords.longitude).catch(console.error);
-    }
-  }, [position, busId]);
 
   return (
     <div style={{ position:"absolute", inset:0, overflow:"hidden" }}>
@@ -3181,6 +3172,16 @@ const busesWithDistance = useMemo(() => {
     (b) => b.driverEmail && user.email && b.driverEmail.toLowerCase() === user.email.toLowerCase()
   );
 
+  // Trip/tracking state lives here (not inside a screen) so GPS keeps running
+  // while the driver navigates between screens or the app is in the background.
+  const [tripActive, setTripActive] = useState<boolean>(() => {
+    try { return !!localStorage.getItem("rit-active-trip"); } catch { return false; }
+  });
+  const driverPosition = useDriverBackgroundLocation(
+    assignedBus?.id ?? "",
+    role === "driver" && tripActive && !!assignedBus
+  );
+
   // Notify the currently logged-in driver when a student shares a location.
   useEffect(() => {
     const previous = previousStopRequests.current;
@@ -3277,6 +3278,11 @@ const selectedBus = busesWithDistance.find((bus) => bus.id === selectedBusId);
   }
 
   function logout() {
+    if (assignedBus?.id && tripActive) {
+      setBusLive(assignedBus.id, false).catch(console.error);
+    }
+    setTripActive(false);
+    try { localStorage.removeItem("rit-active-trip"); } catch {}
     setUser({
       email: "",
       name: "RIT Student",
@@ -3392,11 +3398,11 @@ const selectedBus = busesWithDistance.find((bus) => bus.id === selectedBusId);
         )}
 
         {screen === "driver-start" && (
-          <DriverStartTrip onNav={nav} assignedBus={assignedBus} />
+          <DriverStartTrip onNav={nav} assignedBus={assignedBus} onTripStart={() => setTripActive(true)} />
         )}
 
         {screen === "driver-live" && (
-          <DriverLiveScreen onNav={nav} busId={assignedBus?.id ?? ""} stopsByRoute={stopsByRoute} assignedBus={assignedBus} requests={stopRequests} />
+          <DriverLiveScreen onNav={nav} busId={assignedBus?.id ?? ""} stopsByRoute={stopsByRoute} assignedBus={assignedBus} requests={stopRequests} position={driverPosition} onTripEnd={() => setTripActive(false)} />
         )}
 
         {screen === "admin-home" && (
