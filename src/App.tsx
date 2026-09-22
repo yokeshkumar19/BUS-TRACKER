@@ -145,116 +145,91 @@ function useGeolocation() {
  * - Uploads to Firestore directly inside the GPS callback. It does NOT wait for
  *   a React render/effect, which Android throttles when the app is backgrounded.
  */
-function useDriverBackgroundLocation(): GeolocationPosition | null {
+function useDriverBackgroundLocation(busId: string, active: boolean): GeolocationPosition | null {
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
+  const busIdRef = useRef(busId);
+  useEffect(() => { busIdRef.current = busId; }, [busId]);
 
   useEffect(() => {
+    if (!active) return;
+
+    let cancelled = false;
     let watcherId: string | null = null;
     let browserWatchId: number | null = null;
-    let cancelled = false;
 
-    const startTracking = async () => {
-      // ANDROID / CAPACITOR
-      if (Capacitor.isNativePlatform()) {
-        try {
-          watcherId = await BackgroundGeolocation.addWatcher(
-            {
-              backgroundTitle: "RIT BusTrack",
-              backgroundMessage: "Bus location tracking is active",
-              requestPermissions: true,
-              stale: false,
-              distanceFilter: 10,
-            },
-            (location, error) => {
-              if (cancelled) return;
-
-              if (error) {
-                console.error("Background GPS error:", error);
-                return;
-              }
-
-              if (!location) return;
-
-              const newPosition = {
-                coords: {
-                  latitude: location.latitude,
-                  longitude: location.longitude,
-                  accuracy: location.accuracy ?? 0,
-                  altitude: location.altitude ?? null,
-                  altitudeAccuracy: location.altitudeAccuracy ?? null,
-                  heading: location.bearing ?? null,
-                  speed: location.speed ?? null,
-
-                  toJSON() {
-                    return this;
-                  },
-                },
-
-                timestamp: location.time ?? Date.now(),
-
-                toJSON() {
-                  return this;
-                },
-              } as GeolocationPosition;
-
-              setPosition(newPosition);
-            }
-          );
-
-          console.log("RIT BusTrack background GPS started");
-        } catch (error) {
-          console.error("Unable to start background GPS:", error);
-        }
-
-        return;
+    const push = (lat: number, lng: number) => {
+      if (busIdRef.current) {
+        updateBusLocation(busIdRef.current, lat, lng).catch(err =>
+          console.error("Firestore location upload failed:", err)
+        );
       }
-
-      // WEB / LOCALHOST FALLBACK
-      if (!navigator.geolocation) {
-        console.error("Geolocation is not supported");
-        return;
-      }
-
-      browserWatchId = navigator.geolocation.watchPosition(
-        (newPosition) => {
-          if (!cancelled) {
-            setPosition(newPosition);
-          }
-        },
-        (error) => {
-          console.error("Browser GPS error:", error);
-        },
-        {
-          enableHighAccuracy: true,
-          maximumAge: 5000,
-          timeout: 15000,
-        }
-      );
     };
 
-    startTracking();
+    if (Capacitor.isNativePlatform()) {
+      BackgroundGeolocation.addWatcher(
+        {
+          backgroundTitle: "RIT BusTrack",
+          backgroundMessage: "Bus location tracking is active",
+          requestPermissions: true,
+          stale: false,
+          distanceFilter: 10,
+        },
+        (location, error) => {
+          if (error) {
+            console.error("Background GPS error:", error);
+            return;
+          }
+          if (!location) return;
+
+          push(location.latitude, location.longitude);
+
+          const newPosition = {
+            coords: {
+              latitude: location.latitude,
+              longitude: location.longitude,
+              accuracy: location.accuracy,
+              altitude: location.altitude ?? null,
+              altitudeAccuracy: location.altitudeAccuracy ?? null,
+              heading: location.bearing ?? null,
+              speed: location.speed ?? null,
+              toJSON() { return this; },
+            },
+            timestamp: location.time ?? Date.now(),
+            toJSON() { return this; },
+          } as GeolocationPosition;
+          setPosition(newPosition);
+        }
+      )
+        .then(id => {
+          // If the trip ended before addWatcher resolved, remove it right away.
+          if (cancelled) BackgroundGeolocation.removeWatcher({ id }).catch(console.error);
+          else watcherId = id;
+        })
+        .catch(error => console.error("Unable to start background GPS:", error));
+    } else if (navigator.geolocation) {
+      // Browser fallback
+      browserWatchId = navigator.geolocation.watchPosition(
+        p => {
+          push(p.coords.latitude, p.coords.longitude);
+          setPosition(p);
+        },
+        error => console.error("Browser GPS error:", error),
+        { enableHighAccuracy: true, maximumAge: 10000 }
+      );
+    } else {
+      console.error("Geolocation is not supported");
+    }
 
     return () => {
       cancelled = true;
-
       if (watcherId !== null) {
-        BackgroundGeolocation.removeWatcher({
-          id: watcherId,
-        }).catch((error) => {
-          console.error("Failed to remove GPS watcher:", error);
-        });
-
-        watcherId = null;
+        BackgroundGeolocation.removeWatcher({ id: watcherId }).catch(console.error);
       }
-
-      if (browserWatchId !== null) {
-        navigator.geolocation.clearWatch(browserWatchId);
-        browserWatchId = null;
-      }
+      if (browserWatchId !== null) navigator.geolocation.clearWatch(browserWatchId);
     };
-  }, []);
+  }, [active]);
 
-  return position;
+  return active ? position : null;
 }
 
 function useRealEta(
@@ -1347,6 +1322,31 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
     getDirectionalStops(routeStops?.length ? routeStops : FALLBACK_STOPS, bus),
     busPosition
   );
+
+  // Hide "Pickup Here" once the bus has already gone past the student's
+  // current location, so students can't request a pickup that's no longer
+  // possible. We find the stop nearest to the student's own GPS position
+  // and check whether that stop's live state is already "done".
+  const { position: myPosition } = useGeolocation();
+  const myLoc = myPosition
+    ? { lat: myPosition.coords.latitude, lng: myPosition.coords.longitude }
+    : null;
+  const busHasPassedMe = (() => {
+    if (!myLoc) return false;
+    const plotted = stops.filter(
+      (s): s is FireRouteStop & { lat: number; lng: number } =>
+        typeof s.lat === "number" && typeof s.lng === "number"
+    );
+    if (!plotted.length) return false;
+    let nearest = plotted[0];
+    let nearestDist = distanceMeters(myLoc, nearest);
+    for (const s of plotted.slice(1)) {
+      const d = distanceMeters(myLoc, s);
+      if (d < nearestDist) { nearestDist = d; nearest = s; }
+    }
+    return nearest.state === "done";
+  })();
+
   return (
     <div style={{ position:"absolute", inset:0, background:C.bg, display:"flex", flexDirection:"column" }}>
       <div style={{ background:C.surface, borderBottom:`1px solid ${C.border}` }}>
@@ -1392,7 +1392,13 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
 
         <div style={{ display:"flex", gap:10 }}>
           <GhostBtn label="View Full Route" onClick={() => onNav("route-stops")}/>
-          <PrimaryBtn label="📍 Pickup Here" onClick={() => onNav("stop-here")}/>
+          {busHasPassedMe ? (
+            <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", borderRadius:12, background:C.bg, border:`1px solid ${C.border}`, fontFamily:"Inter,sans-serif", fontSize:12, color:C.muted, textAlign:"center", padding:"0 10px" }}>
+              Bus has already passed your location
+            </div>
+          ) : (
+            <PrimaryBtn label="📍 Pickup Here" onClick={() => onNav("stop-here")}/>
+          )}
         </div>
       </div>
     </div>
@@ -3202,7 +3208,10 @@ const busesWithDistance = useMemo(() => {
   const [tripActive, setTripActive] = useState<boolean>(() => {
     try { return !!localStorage.getItem("rit-active-trip"); } catch { return false; }
   });
- const driverPosition = useDriverBackgroundLocation();
+  const driverPosition = useDriverBackgroundLocation(
+    assignedBus?.id ?? "",
+    role === "driver" && tripActive && !!assignedBus
+  );
 
   // Notify the currently logged-in driver when a student shares a location.
   useEffect(() => {
