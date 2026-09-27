@@ -2,11 +2,24 @@ import * as React from "react";
 import { useEffect,useMemo, useRef, useState } from "react";
 import { Map as MapLibreMap, Marker as MapLibreMarker, Popup as MapLibrePopup, Source, Layer, useMap } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
-import {Capacitor, registerPlugin } from "@capacitor/core";
-import type { BackgroundGeolocationPlugin } from "@capacitor-community/background-geolocation";
+import { Capacitor, registerPlugin, PluginListenerHandle } from "@capacitor/core";
+import { subscribeBusLocations, updateBusLocationSupabase } from "./services/supabaseLocation";
+import { supabase } from "./services/supabaseLocation";
 
-const BackgroundGeolocation =
-  registerPlugin<BackgroundGeolocationPlugin>("BackgroundGeolocation");
+type BusLocationPlugin = {
+  start(opts: { busId: string; projectId: string; apiKey: string; collection?: string }): Promise<void>;
+  stop(): Promise<void>;
+  addListener(
+    eventName: "location",
+    listenerFunc: (data: { latitude: number; longitude: number; accuracy: number; time: number }) => void
+  ): Promise<PluginListenerHandle>;
+};
+
+const BusLocation = registerPlugin<BusLocationPlugin>("BusLocation");
+
+const FIREBASE_PROJECT_ID = import.meta.env.VITE_FIREBASE_PROJECT_ID as string;
+const FIREBASE_API_KEY = import.meta.env.VITE_FIREBASE_API_KEY as string;
+
 
 
 import ritLogo from "@/imports/Logo2.jpeg";
@@ -21,7 +34,6 @@ import {
   updateBus,
   deleteBus,
   setRouteStops,
-  updateBusLocation,
   setBusLive,
   addStopRequest,
   shareStudentLocation,
@@ -154,60 +166,111 @@ function useDriverBackgroundLocation(busId: string, active: boolean): Geolocatio
     if (!active) return;
 
     let cancelled = false;
-    let watcherId: string | null = null;
     let browserWatchId: number | null = null;
+    let listenerHandle: PluginListenerHandle | null = null;
 
-    const push = (lat: number, lng: number) => {
-      if (busIdRef.current) {
-        updateBusLocation(busIdRef.current, lat, lng).catch(err =>
-          console.error("Firestore location upload failed:", err)
-        );
+  const push = async (lat: number, lng: number) => {
+
+  const currentBusId = busIdRef.current;
+
+  if (!currentBusId) {
+    console.error("GPS: busId is missing");
+    return;
+  }
+
+  console.log(
+    "GPS → SUPABASE:",
+    currentBusId,
+    lat,
+    lng
+  );
+
+  const { error } = await supabase
+    .from("bus_locations")
+    .upsert(
+      {
+        bus_id: currentBusId,
+        lat: lat,
+        lng: lng,
+        accuracy: 5,
+        updated_at: new Date().toISOString(),
+        live: true,
+      },
+      {
+        onConflict: "bus_id",
       }
-    };
+    );
+
+  if (error) {
+
+    console.error(
+      "SUPABASE GPS ERROR:",
+      error
+    );
+
+  } else {
+
+    console.log(
+      "SUPABASE GPS SUCCESS:",
+      currentBusId,
+      lat,
+      lng
+    );
+  }
+};
 
     if (Capacitor.isNativePlatform()) {
-      BackgroundGeolocation.addWatcher(
-        {
-          backgroundTitle: "RIT BusTrack",
-          backgroundMessage: "Bus location tracking is active",
-          requestPermissions: true,
-          stale: false,
-          distanceFilter: 10,
-        },
-        (location, error) => {
-          if (error) {
-            console.error("Background GPS error:", error);
-            return;
-          }
-          if (!location) return;
+    BusLocation.addListener("location", (loc) => {
 
-          push(location.latitude, location.longitude);
+  console.log(
+    "ANDROID GPS:",
+    loc.latitude,
+    loc.longitude
+  );
 
-          const newPosition = {
-            coords: {
-              latitude: location.latitude,
-              longitude: location.longitude,
-              accuracy: location.accuracy,
-              altitude: location.altitude ?? null,
-              altitudeAccuracy: location.altitudeAccuracy ?? null,
-              heading: location.bearing ?? null,
-              speed: location.speed ?? null,
-              toJSON() { return this; },
-            },
-            timestamp: location.time ?? Date.now(),
-            toJSON() { return this; },
-          } as GeolocationPosition;
-          setPosition(newPosition);
-        }
-      )
-        .then(id => {
-          // If the trip ended before addWatcher resolved, remove it right away.
-          if (cancelled) BackgroundGeolocation.removeWatcher({ id }).catch(console.error);
-          else watcherId = id;
-        })
-        .catch(error => console.error("Unable to start background GPS:", error));
+  push(
+    loc.latitude,
+    loc.longitude
+  );
+
+  setPosition({
+    coords: {
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      accuracy: loc.accuracy,
+      altitude: null,
+      altitudeAccuracy: null,
+      heading: null,
+      speed: null,
+
+      toJSON() {
+        return this;
+      },
+    },
+
+    timestamp: loc.time,
+
+    toJSON() {
+      return this;
+    },
+  } as GeolocationPosition);
+
+}).then(handle => {
+  if (cancelled) {
+    handle.remove().catch(console.error);
+  } else {
+    listenerHandle = handle;
+  }
+});
+
+      BusLocation.start({
+        busId: busIdRef.current,
+        projectId: FIREBASE_PROJECT_ID,
+        apiKey: FIREBASE_API_KEY,
+        collection: "buses",
+      }).catch(error => console.error("Unable to start background GPS:", error));
+
     } else if (navigator.geolocation) {
-      // Browser fallback
       browserWatchId = navigator.geolocation.watchPosition(
         p => {
           push(p.coords.latitude, p.coords.longitude);
@@ -222,8 +285,9 @@ function useDriverBackgroundLocation(busId: string, active: boolean): Geolocatio
 
     return () => {
       cancelled = true;
-      if (watcherId !== null) {
-        BackgroundGeolocation.removeWatcher({ id: watcherId }).catch(console.error);
+      if (Capacitor.isNativePlatform()) {
+        BusLocation.stop().catch(console.error);
+        listenerHandle?.remove().catch(console.error);
       }
       if (browserWatchId !== null) navigator.geolocation.clearWatch(browserWatchId);
     };
@@ -3147,13 +3211,24 @@ export default function App() {
   // Live Firestore data — these update automatically the instant an admin adds
   // a bus, a driver's GPS moves, or a student submits a stop request. No
   // polling or manual refresh needed anywhere in the app.
-  const [buses, setBuses] = useState<FireBus[]>([]);
+  const [busesRaw, setBusesRaw] = useState<FireBus[]>([]);
+  const [busLocations, setBusLocations] = useState<Record<string, { lat: number; lng: number }>>({});
+  // `buses` combines Firestore metadata (route, eta, driverEmail, live flag, ...)
+  // with the live lat/lng coming from Supabase's bus_locations table. Every
+  // other part of the app keeps using `buses` exactly as before.
+  const buses = useMemo(() => {
+    return busesRaw.map(bus => {
+      const loc = busLocations[bus.id];
+      return loc ? { ...bus, lat: loc.lat, lng: loc.lng } : bus;
+    });
+  }, [busesRaw, busLocations]);
   const [stopsByRoute, setStopsByRoute] = useState<Record<string, FireRouteStop[]>>({});
   const [stopRequests, setStopRequests] = useState<FireStopRequest[]>([]);
   const routeSubs = useRef<Record<string, () => void>>({});
   const previousBuses = useRef<FireBus[] | null>(null);
   const previousStopRequests = useRef<FireStopRequest[] | null>(null);
 const { position: myPosition } = useGeolocation();
+
 
 const busesWithDistance = useMemo(() => {
   // Student distance is always calculated from the student's live GPS
@@ -3169,11 +3244,15 @@ const busesWithDistance = useMemo(() => {
   });
 }, [buses, myPosition]);
   useEffect(() => {
-    const unsubBuses = subscribeBuses(setBuses);
+    const unsubBuses = subscribeBuses(setBusesRaw);
     const unsubRequests = subscribeStopRequests(setStopRequests);
+    const unsubLocations = subscribeBusLocations((busId, lat, lng) => {
+      setBusLocations(prev => ({ ...prev, [busId]: { lat, lng } }));
+    });
     return () => {
       unsubBuses();
       unsubRequests();
+      unsubLocations();
       Object.values(routeSubs.current).forEach((unsub) => unsub());
       routeSubs.current = {};
     };
