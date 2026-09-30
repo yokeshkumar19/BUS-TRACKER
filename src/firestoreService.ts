@@ -1,16 +1,123 @@
-import { db } from "./firebase";
+import { db, firebaseConfig } from "./firebase";
+import { initializeApp, getApps } from "firebase/app";
+import { getAuth, createUserWithEmailAndPassword, signOut as authSignOut } from "firebase/auth";
 import {
   collection,
   doc,
+  getDoc,
+  getDocs,
   onSnapshot,
   addDoc,
   setDoc,
   updateDoc,
   deleteDoc,
   query,
+  where,
   orderBy,
   serverTimestamp,
 } from "firebase/firestore";
+import type { Role, UserProfile } from "./types/types";
+
+export type { Role, UserProfile };
+
+// ── USER PROFILES & DRIVER ACCOUNTS ────────────────────────────────────────
+
+export function subscribeDrivers(cb: (drivers: UserProfile[]) => void) {
+  const q = query(collection(db, "users"), where("role", "==", "driver"));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const drivers = snap.docs.map((d) => d.data() as UserProfile);
+      cb(drivers);
+    },
+    (error) => {
+      console.error("Error subscribing to drivers:", error);
+      cb([]);
+    }
+  );
+}
+
+export async function createDriverAccount({
+  name,
+  email,
+  password,
+  busId,
+}: {
+  name: string;
+  email: string;
+  password: string;
+  busId?: string;
+}): Promise<UserProfile> {
+  const secondaryAppName = "DriverCreationApp";
+  const secondaryApp =
+    getApps().find((app) => app.name === secondaryAppName) ||
+    initializeApp(firebaseConfig, secondaryAppName);
+  const secondaryAuth = getAuth(secondaryApp);
+
+  try {
+    const cred = await createUserWithEmailAndPassword(
+      secondaryAuth,
+      email.trim().toLowerCase(),
+      password
+    );
+
+    const userProfile = await createUserProfile(cred.user.uid, {
+      email: email.trim().toLowerCase(),
+      name: name.trim(),
+      role: "driver",
+      assignedBusId: busId || undefined,
+    });
+
+    if (busId) {
+      await updateBus(busId, {
+        driverEmail: email.trim().toLowerCase(),
+      });
+    }
+
+    return userProfile;
+  } finally {
+    try {
+      await authSignOut(secondaryAuth);
+    } catch {}
+  }
+}
+
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const snap = await getDoc(doc(db, "users", uid));
+  if (!snap.exists()) {
+    return null;
+  }
+  return snap.data() as UserProfile;
+}
+
+export async function createUserProfile(
+  uid: string,
+  profile: {
+    email: string;
+    name: string;
+    role?: Role;
+    assignedBusId?: string;
+  }
+): Promise<UserProfile> {
+  const userRef = doc(db, "users", uid);
+  const data: UserProfile = {
+    uid,
+    email: profile.email,
+    name: profile.name,
+    role: profile.role || "student",
+    ...(profile.assignedBusId ? { assignedBusId: profile.assignedBusId } : {}),
+    createdAt: serverTimestamp(),
+  };
+  await setDoc(userRef, data);
+  return data;
+}
+
+export async function updateUserProfile(
+  uid: string,
+  data: Partial<Omit<UserProfile, "uid" | "createdAt">>
+) {
+  await updateDoc(doc(db, "users", uid), data);
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -66,12 +173,17 @@ export type FireStopRequest = {
   busId?: string;
   busNumber?: string;
   driverEmail?: string;
+  targetDriverEmail?: string;
 
   // Student GPS location
   lat?: number;
   lng?: number;
 
+  kind?: string;
+  locationShared?: boolean;
+
   createdAt?: unknown;
+  decidedAt?: unknown;
 };
 
 export type FireStudentLocation = {
@@ -167,6 +279,7 @@ export async function setBusLive(
     doc(db, "buses", id),
     {
       live,
+      updatedAt: serverTimestamp(),
     }
   );
 }
@@ -211,6 +324,17 @@ export async function setRouteStops(
   routeCode: string,
   stops: Omit<FireRouteStop, "order">[]
 ) {
+  try {
+    const stopsRef = collection(db, "routes", routeCode, "stops");
+    const existing = await getDocs(stopsRef);
+    const deleteOld = existing.docs
+      .filter((d) => Number(d.id) >= stops.length || isNaN(Number(d.id)))
+      .map((d) => deleteDoc(d.ref));
+    await Promise.all(deleteOld);
+  } catch (err) {
+    console.warn("Could not clean old stops:", err);
+  }
+
   await Promise.all(
     stops.map((stop, index) =>
       setDoc(
@@ -260,19 +384,71 @@ export function subscribeStopRequests(
   );
 }
 
+export function subscribeStopRequestsForDriver(
+  driverEmail: string,
+  cb: (reqs: FireStopRequest[]) => void
+) {
+  const normalized = driverEmail.trim().toLowerCase();
+  const q = query(
+    collection(db, "stopRequests"),
+    where("targetDriverEmail", "==", normalized)
+  );
+
+  return onSnapshot(
+    q,
+    (snap) => {
+      const requests: FireStopRequest[] =
+        snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<
+            FireStopRequest,
+            "id"
+          >),
+        }));
+
+      cb(requests);
+    },
+    (error) => {
+      console.error(
+        "Error loading driver stop requests:",
+        error
+      );
+
+      cb([]);
+    }
+  );
+}
+
 export async function addStopRequest(
   req: Omit<
     FireStopRequest,
     "id" | "status"
   >
 ) {
+  const rawTarget = req.targetDriverEmail?.trim().toLowerCase() || "";
+  const rawDriver = req.driverEmail?.trim().toLowerCase() || rawTarget;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const validDriverEmail = emailRegex.test(rawDriver) ? rawDriver : undefined;
+  const validTargetEmail = emailRegex.test(rawTarget) ? rawTarget : (validDriverEmail || "");
+
+  const docData: Record<string, any> = {
+    ...req,
+    ...(req.studentEmail ? { studentEmail: req.studentEmail.trim().toLowerCase() } : {}),
+    status: "pending",
+    createdAt: serverTimestamp(),
+  };
+
+  if (validDriverEmail) {
+    docData.driverEmail = validDriverEmail;
+  } else {
+    delete docData.driverEmail;
+  }
+
+  docData.targetDriverEmail = validTargetEmail;
+
   await addDoc(
     collection(db, "stopRequests"),
-    {
-      ...req,
-      status: "pending",
-      createdAt: serverTimestamp(),
-    }
+    docData
   );
 }
 
@@ -301,9 +477,9 @@ export async function shareStudentLocation(
     "id"
   >
 ) {
-  const safeId = encodeURIComponent(
-    location.studentEmail
-  );
+  const studentEmail = location.studentEmail.trim().toLowerCase();
+  const driverEmail = location.driverEmail.trim().toLowerCase();
+  const safeId = encodeURIComponent(studentEmail);
 
   await setDoc(
     doc(
@@ -313,6 +489,8 @@ export async function shareStudentLocation(
     ),
     {
       ...location,
+      studentEmail,
+      driverEmail,
       active: true,
       sharedAt: serverTimestamp(),
     }
@@ -325,7 +503,7 @@ export async function stopSharingStudentLocation(
   studentEmail: string
 ) {
   const safeId = encodeURIComponent(
-    studentEmail
+    studentEmail.trim().toLowerCase()
   );
 
   await updateDoc(
@@ -352,11 +530,17 @@ export function subscribeStudentLocations(
     locations: FireStudentLocation[]
   ) => void
 ) {
-  return onSnapshot(
+  const normalized = driverEmail.trim().toLowerCase();
+  const q = query(
     collection(
       db,
       "studentLocations"
     ),
+    where("driverEmail", "==", normalized)
+  );
+
+  return onSnapshot(
+    q,
     (snap) => {
       const locations: FireStudentLocation[] =
         snap.docs
@@ -369,8 +553,6 @@ export function subscribeStudentLocations(
           }))
           .filter(
             (location) =>
-              location.driverEmail ===
-                driverEmail &&
               location.active !== false
           );
 
@@ -432,6 +614,8 @@ export async function notifyDriverStudentLocation(
     ),
     {
       ...notification,
+      driverEmail: notification.driverEmail.trim().toLowerCase(),
+      ...(notification.studentEmail ? { studentEmail: notification.studentEmail.trim().toLowerCase() } : {}),
       read: false,
       createdAt: serverTimestamp(),
     }
@@ -446,11 +630,17 @@ export function subscribeDriverNotifications(
     notifications: FireDriverNotification[]
   ) => void
 ) {
-  return onSnapshot(
+  const normalized = driverEmail.trim().toLowerCase();
+  const q = query(
     collection(
       db,
       "driverNotifications"
     ),
+    where("driverEmail", "==", normalized)
+  );
+
+  return onSnapshot(
+    q,
     (snap) => {
       const notifications: FireDriverNotification[] =
         snap.docs

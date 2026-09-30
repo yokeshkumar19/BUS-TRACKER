@@ -1,0 +1,507 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: users
+// Document ID: {uid} (Firebase Auth UID)
+// Fields:
+//   - uid: string (required, immutable) - Firebase Auth User ID
+//   - email: string (required, valid email, <= 128 chars) - User email
+//   - name: string (required, 1-100 chars) - User display name
+//   - role: string (required, 'student' | 'driver' | 'admin') - Role of user
+//   - assignedBusId: string (optional, <= 100 chars) - Bus ID assigned to driver
+//   - createdAt: timestamp (required, immutable) - Account profile creation time
+//
+// Collection: buses
+// Document ID: {busId}
+// Fields:
+//   - n: string (required, 1-50 chars, immutable for drivers) - Bus identifier/number
+//   - r: string (required, 1-50 chars, immutable for drivers) - Route code
+//   - routeName: string (required, 1-150 chars) - Human-readable route name
+//   - eta: number (optional, >= 0) - Estimated arrival time in minutes
+//   - live: bool (optional) - Whether bus is currently actively tracking
+//   - dist: string (optional, <= 50 chars) - Distance label
+//   - stops: number (required, >= 0) - Number of stops along route
+//   - lat: number (optional, -90 to 90) - Current latitude of bus
+//   - lng: number (optional, -180 to 180) - Current longitude of bus
+//   - driverEmail: string (optional, valid email, immutable for drivers) - Assigned driver email
+//   - direction: string (optional, <= 30 chars) - Trip direction ('outbound' | 'return')
+//   - updatedAt: timestamp (optional) - Timestamp of last location update
+//   - BusNumber: string (optional, <= 50 chars) - Compatibility alias
+//   - Route: string (optional, <= 50 chars) - Compatibility alias
+//   - Status: string (optional, <= 50 chars) - Compatibility alias
+//   - Time: string (optional, <= 50 chars) - Compatibility alias
+//
+// Collection: routes
+// Document ID: {routeCode}
+// Subcollection: routes/{routeCode}/stops/{stopId}
+// Stop Fields:
+//   - name: string (required, 1-100 chars) - Stop name
+//   - time: string (required, 1-30 chars) - Scheduled time
+//   - state: string (required, 'done' | 'current' | 'upcoming') - Status of stop
+//   - order: number (required, >= 0) - Sequence order
+//   - lat: number (optional, -90 to 90) - Latitude
+//   - lng: number (optional, -180 to 180) - Longitude
+//
+// Collection: stopRequests
+// Document ID: {requestId}
+// Fields:
+//   - loc: string (required, 1-150 chars) - Request location name
+//   - route: string (required, 1-50 chars) - Bus route code
+//   - count: number (required, 1-100) - Number of waiting students
+//   - reason: string (required, <= 500 chars) - Reason for request
+//   - status: string (required, 'pending' | 'approved' | 'rejected')
+//   - studentEmail: string (required, valid email, <= 128 chars) - Requesting student email
+//   - studentName: string (optional, <= 100 chars) - Student full name
+//   - busId: string (optional, <= 100 chars) - Associated bus document ID
+//   - busNumber: string (optional, <= 50 chars) - Associated bus number
+//   - driverEmail: string (optional, valid email, <= 128 chars) - Driver email
+//   - targetDriverEmail: string (optional, <= 128 chars) - Target driver email
+//   - lat: number (optional, -90 to 90) - Student latitude
+//   - lng: number (optional, -180 to 180) - Student longitude
+//   - kind: string (optional, <= 50 chars) - Request kind
+//   - locationShared: bool (optional) - Whether student shared live GPS
+//   - createdAt: timestamp (optional) - Creation time
+//   - decidedAt: timestamp (optional) - Decision timestamp
+//
+// Collection: studentLocations
+// Document ID: {docId} (encoded student email)
+// Fields:
+//   - studentEmail: string (required, valid email, <= 128 chars) - Student email
+//   - studentName: string (required, 1-100 chars) - Student full name
+//   - busId: string (required, <= 100 chars) - Bus document ID
+//   - busNumber: string (required, <= 50 chars) - Bus number
+//   - driverEmail: string (required, valid email, <= 128 chars) - Driver email
+//   - lat: number (required, -90 to 90) - GPS latitude
+//   - lng: number (required, -180 to 180) - GPS longitude
+//   - active: bool (optional) - Sharing state
+//   - sharedAt: timestamp (optional) - Sharing start time
+//   - stoppedAt: timestamp (optional) - Sharing stop time
+//
+// Collection: driverNotifications
+// Document ID: {notificationId}
+// Fields:
+//   - driverEmail: string (required, valid email, <= 128 chars) - Recipient driver email
+//   - title: string (required, 1-150 chars) - Notification title
+//   - message: string (required, <= 500 chars) - Notification body
+//   - type: string (required, 'student-location' | 'stop-request' | 'general')
+//   - read: bool (required) - Read status
+//   - studentEmail: string (optional, valid email, <= 128 chars) - Requesting student email
+//   - studentName: string (optional, <= 100 chars) - Requesting student name
+//   - busId: string (optional, <= 100 chars) - Bus ID
+//   - busNumber: string (optional, <= 50 chars) - Bus number
+//   - lat: number (optional, -90 to 90) - Latitude
+//   - lng: number (optional, -180 to 180) - Longitude
+//   - createdAt: timestamp (optional) - Timestamp of notification
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function hasUserDoc() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return hasUserDoc() ? getUserData().role : null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isDriver() {
+      return isAuthenticated() && getUserRole() == 'driver';
+    }
+
+    function isStudent() {
+      return isAuthenticated() && getUserRole() == 'student';
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isSameEmail(email1, email2) {
+      return email1 is string && email2 is string &&
+        email1.lower() == email2.lower();
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data, uid) {
+      return data.keys().hasOnly(['uid', 'email', 'name', 'role', 'assignedBusId', 'createdAt']) &&
+        data.keys().hasAll(['uid', 'email', 'name', 'role', 'createdAt']) &&
+        data.uid is string && data.uid == uid && data.uid.size() <= 128 &&
+        data.email is string && isValidEmail(data.email) && data.email.size() <= 128 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.role in ['student', 'driver', 'admin'] &&
+        (!('assignedBusId' in data) || (data.assignedBusId is string && data.assignedBusId.size() <= 100)) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidBus(data) {
+      return data.keys().hasOnly([
+          'n', 'r', 'routeName', 'eta', 'live', 'dist', 'stops',
+          'lat', 'lng', 'driverEmail', 'direction', 'updatedAt',
+          'BusNumber', 'Route', 'Status', 'Time'
+        ]) &&
+        data.keys().hasAll(['n', 'r', 'routeName', 'stops']) &&
+        data.n is string && data.n.size() >= 1 && data.n.size() <= 50 &&
+        data.r is string && data.r.size() >= 1 && data.r.size() <= 50 &&
+        data.routeName is string && data.routeName.size() >= 1 && data.routeName.size() <= 150 &&
+        data.stops is number && data.stops >= 0 &&
+        (!('eta' in data) || (data.eta is number && data.eta >= 0)) &&
+        (!('live' in data) || data.live is bool) &&
+        (!('dist' in data) || (data.dist is string && data.dist.size() <= 50)) &&
+        (!('lat' in data) || (data.lat is number && data.lat >= -90.0 && data.lat <= 90.0)) &&
+        (!('lng' in data) || (data.lng is number && data.lng >= -180.0 && data.lng <= 180.0)) &&
+        (!('driverEmail' in data) || (data.driverEmail is string && (data.driverEmail == '' || isValidEmail(data.driverEmail)) && data.driverEmail.size() <= 128)) &&
+        (!('direction' in data) || (data.direction is string && data.direction.size() <= 30)) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+        (!('BusNumber' in data) || (data.BusNumber is string && data.BusNumber.size() <= 50)) &&
+        (!('Route' in data) || (data.Route is string && data.Route.size() <= 50)) &&
+        (!('Status' in data) || (data.Status is string && data.Status.size() <= 50)) &&
+        (!('Time' in data) || (data.Time is string && data.Time.size() <= 50));
+    }
+
+    function isValidRoute(data) {
+      return data.keys().hasOnly(['code', 'name', 'description', 'active', 'createdAt', 'updatedAt']) &&
+        (!('code' in data) || (data.code is string && data.code.size() <= 50)) &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 150)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+        (!('active' in data) || data.active is bool) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidRouteStop(data) {
+      return data.keys().hasOnly(['name', 'time', 'state', 'order', 'lat', 'lng']) &&
+        data.keys().hasAll(['name', 'time', 'state', 'order']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.time is string && data.time.size() >= 0 && data.time.size() <= 30 &&
+        data.state in ['done', 'current', 'upcoming'] &&
+        data.order is number && data.order >= 0 &&
+        (!('lat' in data) || (data.lat is number && data.lat >= -90.0 && data.lat <= 90.0)) &&
+        (!('lng' in data) || (data.lng is number && data.lng >= -180.0 && data.lng <= 180.0));
+    }
+
+    function isValidStopRequest(data) {
+      return data.keys().hasOnly([
+          'loc', 'route', 'count', 'reason', 'status',
+          'studentEmail', 'studentName', 'busId', 'busNumber',
+          'driverEmail', 'targetDriverEmail', 'lat', 'lng',
+          'kind', 'locationShared', 'createdAt', 'decidedAt'
+        ]) &&
+        data.keys().hasAll(['loc', 'route', 'count', 'reason', 'status', 'studentEmail']) &&
+        data.loc is string && data.loc.size() >= 1 && data.loc.size() <= 150 &&
+        data.route is string && data.route.size() >= 1 && data.route.size() <= 50 &&
+        data.count is number && data.count >= 1 && data.count <= 100 &&
+        data.reason is string && data.reason.size() <= 500 &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        data.studentEmail is string && isValidEmail(data.studentEmail) && data.studentEmail.size() <= 128 &&
+        (!('studentName' in data) || (data.studentName is string && data.studentName.size() <= 100)) &&
+        (!('busId' in data) || (data.busId is string && data.busId.size() <= 100)) &&
+        (!('busNumber' in data) || (data.busNumber is string && data.busNumber.size() <= 50)) &&
+        (!('driverEmail' in data) || (data.driverEmail is string && (data.driverEmail == '' || isValidEmail(data.driverEmail)) && data.driverEmail.size() <= 128)) &&
+        (!('targetDriverEmail' in data) || (data.targetDriverEmail is string && (data.targetDriverEmail == '' || isValidEmail(data.targetDriverEmail)) && data.targetDriverEmail.size() <= 128)) &&
+        (!('lat' in data) || (data.lat is number && data.lat >= -90.0 && data.lat <= 90.0)) &&
+        (!('lng' in data) || (data.lng is number && data.lng >= -180.0 && data.lng <= 180.0)) &&
+        (!('kind' in data) || (data.kind is string && data.kind.size() <= 50)) &&
+        (!('locationShared' in data) || data.locationShared is bool) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('decidedAt' in data) || data.decidedAt is timestamp);
+    }
+
+    function isValidStudentLocation(data) {
+      return data.keys().hasOnly([
+          'studentEmail', 'studentName', 'busId', 'busNumber',
+          'driverEmail', 'lat', 'lng', 'active', 'sharedAt', 'stoppedAt'
+        ]) &&
+        data.keys().hasAll(['studentEmail', 'studentName', 'busId', 'busNumber', 'driverEmail', 'lat', 'lng']) &&
+        data.studentEmail is string && isValidEmail(data.studentEmail) && data.studentEmail.size() <= 128 &&
+        data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 100 &&
+        data.busId is string && data.busId.size() <= 100 &&
+        data.busNumber is string && data.busNumber.size() <= 50 &&
+        data.driverEmail is string && isValidEmail(data.driverEmail) && data.driverEmail.size() <= 128 &&
+        data.lat is number && data.lat >= -90.0 && data.lat <= 90.0 &&
+        data.lng is number && data.lng >= -180.0 && data.lng <= 180.0 &&
+        (!('active' in data) || data.active is bool) &&
+        (!('sharedAt' in data) || data.sharedAt is timestamp) &&
+        (!('stoppedAt' in data) || data.stoppedAt is timestamp);
+    }
+
+    function isValidDriverNotification(data) {
+      return data.keys().hasOnly([
+          'driverEmail', 'title', 'message', 'type', 'read',
+          'studentEmail', 'studentName', 'busId', 'busNumber',
+          'lat', 'lng', 'createdAt'
+        ]) &&
+        data.keys().hasAll(['driverEmail', 'title', 'message', 'type', 'read']) &&
+        data.driverEmail is string && isValidEmail(data.driverEmail) && data.driverEmail.size() <= 128 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.message is string && data.message.size() <= 500 &&
+        data.type in ['student-location', 'stop-request', 'general'] &&
+        data.read is bool &&
+        (!('studentEmail' in data) || (data.studentEmail is string && isValidEmail(data.studentEmail) && data.studentEmail.size() <= 128)) &&
+        (!('studentName' in data) || (data.studentName is string && data.studentName.size() <= 100)) &&
+        (!('busId' in data) || (data.busId is string && data.busId.size() <= 100)) &&
+        (!('busNumber' in data) || (data.busNumber is string && data.busNumber.size() <= 50)) &&
+        (!('lat' in data) || (data.lat is number && data.lat >= -90.0 && data.lat <= 90.0)) &&
+        (!('lng' in data) || (data.lng is number && data.lng >= -180.0 && data.lng <= 180.0)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    // -------------------------------------------------------------
+    // users collection
+    // -------------------------------------------------------------
+    match /users/{uid} {
+      // Authenticated user can read their own profile, or any admin can read
+      allow read: if isAuthenticated() && (
+        request.auth.uid == uid ||
+        isAdmin()
+      );
+
+      // User can create their own profile; non-admins MUST set role to 'student'
+      // Profile email must match the authenticated Firebase Auth token email
+      // Admins can create profiles with any role
+      allow create: if isAuthenticated() && isValidUser(request.resource.data, uid) && (
+        (
+          request.auth.uid == uid &&
+          request.resource.data.role == 'student' &&
+          isSameEmail(request.resource.data.email, request.auth.token.email)
+        ) ||
+        isAdmin()
+      );
+
+      // User can update their own profile; non-admins CANNOT change role
+      // Non-admins cannot change profile email independently of Firebase Auth
+      // Admins can update any profile including role
+      // Document uid and createdAt are strictly immutable
+      allow update: if isAuthenticated() && isValidUser(request.resource.data, uid) &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.createdAt == resource.data.createdAt && (
+          (
+            request.auth.uid == uid &&
+            request.resource.data.role == resource.data.role &&
+            isSameEmail(request.resource.data.email, resource.data.email) &&
+            isSameEmail(request.resource.data.email, request.auth.token.email)
+          ) ||
+          isAdmin()
+        );
+
+      // Only admins can delete profiles
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------
+    // buses collection
+    // -------------------------------------------------------------
+    match /buses/{busId} {
+      // Any authenticated user can read buses
+      allow read: if isAuthenticated();
+
+      // Only admins can create or delete buses
+      allow create: if isAdmin() && isValidBus(request.resource.data);
+      allow delete: if isAdmin();
+
+      // Admins can update any field.
+      // Drivers can update ONLY their assigned bus, and cannot reassign or change core identifiers.
+      // Drivers can update operational fields: live, direction, lat, lng, updatedAt.
+      allow update: if isAuthenticated() && isValidBus(request.resource.data) && (
+        isAdmin() ||
+        (
+          isDriver() &&
+          'driverEmail' in resource.data &&
+          isSameEmail(resource.data.driverEmail, request.auth.token.email) &&
+          'driverEmail' in request.resource.data &&
+          isSameEmail(request.resource.data.driverEmail, resource.data.driverEmail) &&
+          request.resource.data.n == resource.data.n &&
+          request.resource.data.r == resource.data.r &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'live', 'direction', 'lat', 'lng', 'updatedAt'
+          ])
+        )
+      );
+    }
+
+    // -------------------------------------------------------------
+    // routes collection & stops subcollection
+    // -------------------------------------------------------------
+    match /routes/{routeCode} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidRoute(request.resource.data);
+      allow delete: if isAdmin();
+
+      match /stops/{stopId} {
+        allow read: if isAuthenticated();
+        allow create, update: if isAdmin() && isValidRouteStop(request.resource.data);
+        allow delete: if isAdmin();
+      }
+    }
+
+    // -------------------------------------------------------------
+    // stopRequests collection
+    // -------------------------------------------------------------
+    match /stopRequests/{requestId} {
+      // Read: Admin can read all.
+      // Driver can read if request is for their assigned bus/email.
+      // Student can read their own requests.
+      // Direct field equality allows Firestore static query authorization for
+      // queries like where("targetDriverEmail", "==", email) or where("studentEmail", "==", email).
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.studentEmail == request.auth.token.email ||
+        resource.data.studentEmail == request.auth.token.email.lower() ||
+        (
+          isDriver() && (
+            resource.data.targetDriverEmail == request.auth.token.email ||
+            resource.data.targetDriverEmail == request.auth.token.email.lower() ||
+            resource.data.driverEmail == request.auth.token.email ||
+            resource.data.driverEmail == request.auth.token.email.lower()
+          )
+        )
+      );
+
+      // Create: Authenticated student or user creating request for themselves with pending status
+      allow create: if isAuthenticated() && isValidStopRequest(request.resource.data) && (
+        (isSameEmail(request.resource.data.studentEmail, request.auth.token.email) && request.resource.data.status == 'pending') ||
+        isAdmin()
+      );
+
+      // Update: Admin can update all fields.
+      // Driver can update status to 'approved' or 'rejected' if targeted to them.
+      allow update: if isAuthenticated() && isValidStopRequest(request.resource.data) && (
+        isAdmin() ||
+        (
+          isDriver() && (
+            isSameEmail(resource.data.driverEmail, request.auth.token.email) ||
+            isSameEmail(resource.data.targetDriverEmail, request.auth.token.email)
+          ) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'decidedAt']) &&
+          request.resource.data.status in ['approved', 'rejected']
+        )
+      );
+
+      // Delete: Only admin
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------
+    // studentLocations collection
+    // -------------------------------------------------------------
+    match /studentLocations/{docId} {
+      // Read: Admin can read all.
+      // Driver can read if addressed to them.
+      // Student can read their own.
+      // Direct field equality allows Firestore static query authorization for
+      // queries like where("driverEmail", "==", email) or where("studentEmail", "==", email).
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.studentEmail == request.auth.token.email ||
+        resource.data.studentEmail == request.auth.token.email.lower() ||
+        (
+          isDriver() && (
+            resource.data.driverEmail == request.auth.token.email ||
+            resource.data.driverEmail == request.auth.token.email.lower()
+          )
+        )
+      );
+
+      // Create: Student writes their own location, or admin
+      allow create: if isAuthenticated() && isValidStudentLocation(request.resource.data) && (
+        isSameEmail(request.resource.data.studentEmail, request.auth.token.email) ||
+        isAdmin()
+      );
+
+      // Update: Student updates their own location, or admin
+      allow update: if isAuthenticated() && isValidStudentLocation(request.resource.data) && (
+        (
+          isSameEmail(resource.data.studentEmail, request.auth.token.email) &&
+          isSameEmail(request.resource.data.studentEmail, request.auth.token.email)
+        ) ||
+        isAdmin()
+      );
+
+      // Delete: Student can delete their own, or admin
+      allow delete: if isAuthenticated() && (
+        isSameEmail(resource.data.studentEmail, request.auth.token.email) ||
+        isAdmin()
+      );
+    }
+
+    // -------------------------------------------------------------
+    // driverNotifications collection
+    // -------------------------------------------------------------
+    match /driverNotifications/{notificationId} {
+      // Read: Addressed driver or admin
+      // Direct field equality allows Firestore static query authorization for
+      // queries like where("driverEmail", "==", email).
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.driverEmail == request.auth.token.email ||
+        resource.data.driverEmail == request.auth.token.email.lower()
+      );
+
+      // Create: Admin can create any notification.
+      // Non-admin students can ONLY create unread notifications for their own legitimate
+      // requests ('student-location' or 'stop-request') matching their authenticated email.
+      allow create: if isAuthenticated() && isValidDriverNotification(request.resource.data) && (
+        isAdmin() ||
+        (
+          request.resource.data.type in ['student-location', 'stop-request'] &&
+          'studentEmail' in request.resource.data &&
+          isSameEmail(request.resource.data.studentEmail, request.auth.token.email) &&
+          request.resource.data.read == false
+        )
+      );
+
+      // Update: Addressed driver (to mark read: true) or admin
+      allow update: if isAuthenticated() && isValidDriverNotification(request.resource.data) && (
+        (
+          isSameEmail(resource.data.driverEmail, request.auth.token.email) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+          request.resource.data.read == true
+        ) ||
+        isAdmin()
+      );
+
+      // Delete: Addressed driver or admin
+      allow delete: if isAuthenticated() && (
+        isSameEmail(resource.data.driverEmail, request.auth.token.email) ||
+        isAdmin()
+      );
+    }
+
+    // -------------------------------------------------------------
+    // Default Deny
+    // -------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

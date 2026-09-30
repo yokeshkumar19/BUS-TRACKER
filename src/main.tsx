@@ -17,6 +17,10 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren, { error:
     return { error }
   }
 
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("AppErrorBoundary caught error:", error, errorInfo)
+  }
+
   render() {
     if (!this.state.error) return this.props.children
 

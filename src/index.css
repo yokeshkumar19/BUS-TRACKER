@@ -63,24 +63,68 @@ input, textarea, button { font-family: inherit; }
   50%       { transform: translateY(-6px); }
 }
 
-.theme-dark,
-.theme-dark div,
-.theme-dark section {
-  --dark-bg: #101820;
-  --dark-surface: #18232d;
-  --dark-border: #2b3a46;
-  --dark-text: #f2f6f8;
-  --dark-sub: #afbdc7;
+:root {
+  color-scheme: light;
+  --c-navy: #0D1B2A;
+  --c-blue: #1565C0;
+  --c-blue-mid: #1976D2;
+  --c-sky: #0288D1;
+  --c-sky-light: #E1F0FA;
+  --c-sky-subtle: rgba(2, 136, 209, 0.12);
+  --c-live: #1B8C3E;
+  --c-live-bg: #E8F5EE;
+  --c-warn: #C84B11;
+  --c-warn-bg: #FEF0E8;
+  --c-border: #E4E9F0;
+  --c-bg: #F7F9FC;
+  --c-surface: #FFFFFF;
+  --c-text: #0D1B2A;
+  --c-sub: #4A5568;
+  --c-muted: #8A96A3;
+  --c-blue-subtle: rgba(21, 101, 192, 0.08);
+  --c-blue-glow: rgba(21, 101, 192, 0.22);
+  --c-danger: #C62828;
+  --c-danger-bg: #FFEBEE;
 }
 
-.theme-dark { color-scheme: dark; background: var(--dark-bg) !important; }
-.theme-dark div[style*="background: rgb(255, 255, 255)"],
-.theme-dark div[style*="background:#FFFFFF"],
-.theme-dark div[style*="background: #FFFFFF"],
-.theme-dark div[style*="background:#fff"],
-.theme-dark div[style*="background: #fff"] { background: var(--dark-surface) !important; }
-.theme-dark input,
-.theme-dark textarea { color: var(--dark-text) !important; }
-.theme-dark input::placeholder,
-.theme-dark textarea::placeholder { color: #82919c; }
-.theme-dark button:not([style*="background: #1565C0"]):not([style*="background:#1565C0"]) { color: inherit; }
+.theme-dark,
+html.theme-dark,
+body.theme-dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-navy: #E2E8F0;
+  --c-blue: #3B82F6;
+  --c-blue-mid: #60A5FA;
+  --c-sky: #38BDF8;
+  --c-sky-light: rgba(56, 189, 248, 0.18);
+  --c-sky-subtle: rgba(56, 189, 248, 0.14);
+  --c-live: #34D399;
+  --c-live-bg: rgba(52, 211, 153, 0.16);
+  --c-warn: #FB923C;
+  --c-warn-bg: rgba(251, 146, 60, 0.16);
+  --c-border: #1E293B;
+  --c-bg: #0A0F1D;
+  --c-surface: #111A2E;
+  --c-text: #F8FAFC;
+  --c-sub: #94A3B8;
+  --c-muted: #64748B;
+  --c-blue-subtle: rgba(59, 130, 246, 0.16);
+  --c-blue-glow: rgba(59, 130, 246, 0.32);
+  --c-danger: #F87171;
+  --c-danger-bg: rgba(239, 68, 68, 0.16);
+}
+
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+input, textarea, select {
+  color: var(--c-text);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--c-muted);
+}
+
