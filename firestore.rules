@@ -151,13 +151,13 @@ service cloud.firestore {
 
     function isValidUser(data, uid) {
       return data.keys().hasOnly(['uid', 'email', 'name', 'role', 'assignedBusId', 'createdAt']) &&
-        data.keys().hasAll(['uid', 'email', 'name', 'role', 'createdAt']) &&
+        data.keys().hasAll(['uid', 'email', 'name', 'role']) &&
         data.uid is string && data.uid == uid && data.uid.size() <= 128 &&
         data.email is string && isValidEmail(data.email) && data.email.size() <= 128 &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
         data.role in ['student', 'driver', 'admin'] &&
         (!('assignedBusId' in data) || (data.assignedBusId is string && data.assignedBusId.size() <= 100)) &&
-        data.createdAt is timestamp;
+        (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
     function isValidBus(data) {
@@ -287,13 +287,17 @@ service cloud.firestore {
       );
 
       // User can create their own profile; non-admins MUST set role to 'student'
-      // Profile email must match the authenticated Firebase Auth token email
+      // Profile email must match the authenticated Firebase Auth token email (if present)
       // Admins can create profiles with any role
       allow create: if isAuthenticated() && isValidUser(request.resource.data, uid) && (
         (
           request.auth.uid == uid &&
           request.resource.data.role == 'student' &&
-          isSameEmail(request.resource.data.email, request.auth.token.email)
+          request.resource.data.uid == uid &&
+          (
+            request.auth.token.email == null ||
+            isSameEmail(request.resource.data.email, request.auth.token.email)
+          )
         ) ||
         isAdmin()
       );
@@ -301,15 +305,18 @@ service cloud.firestore {
       // User can update their own profile; non-admins CANNOT change role
       // Non-admins cannot change profile email independently of Firebase Auth
       // Admins can update any profile including role
-      // Document uid and createdAt are strictly immutable
+      // Document uid is strictly immutable
       allow update: if isAuthenticated() && isValidUser(request.resource.data, uid) &&
         request.resource.data.uid == resource.data.uid &&
-        request.resource.data.createdAt == resource.data.createdAt && (
+        (!('createdAt' in resource.data) || !('createdAt' in request.resource.data) || request.resource.data.createdAt == resource.data.createdAt) && (
           (
             request.auth.uid == uid &&
             request.resource.data.role == resource.data.role &&
             isSameEmail(request.resource.data.email, resource.data.email) &&
-            isSameEmail(request.resource.data.email, request.auth.token.email)
+            (
+              request.auth.token.email == null ||
+              isSameEmail(request.resource.data.email, request.auth.token.email)
+            )
           ) ||
           isAdmin()
         );

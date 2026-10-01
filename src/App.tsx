@@ -13,6 +13,8 @@ type BusLocationPlugin = {
     eventName: "location",
     listenerFunc: (data: { latitude: number; longitude: number; accuracy: number; time: number }) => void
   ): Promise<PluginListenerHandle>;
+  checkPermissions?(): Promise<{ location?: string; notifications?: string }>;
+  requestPermissions?(opts?: { permissions: ("location" | "notifications")[] }): Promise<{ location?: string; notifications?: string }>;
 };
 
 const BusLocation = registerPlugin<BusLocationPlugin>("BusLocation");
@@ -135,11 +137,6 @@ function nowLabel() {
   return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-async function enableBrowserNotifications() {
-  if (!("Notification" in window)) return "unsupported" as const;
-  return Notification.requestPermission();
-}
-
 function nameFromEmail(email: string) {
   const localPart = email.split("@")[0].replace(/[._-]+/g, " ").replace(/\d+/g, " ").trim();
   return localPart ? localPart.split(" ").filter(Boolean).map(word => word[0].toUpperCase() + word.slice(1).toLowerCase()).join(" ") : "RIT Student";
@@ -150,18 +147,84 @@ const copy = {
   ta: { profile: "சுயவிவரம்", settings: "அமைப்புகள்", appearance: "தோற்றம்", darkMode: "இருண்ட பயன்முறை", language: "மொழி", english: "ஆங்கிலம்", tamil: "தமிழ்", save: "சேமிக்கப்பட்டது", signOut: "வெளியேறு" },
 } as const;
 
-function useGeolocation() {
+async function requestTrackingPermissions(): Promise<{ location: boolean; notification: boolean }> {
+  let locationGranted = false;
+  let notificationGranted = false;
+
+  // 1. Notification Permission (Android Native + Web)
+  try {
+    if (Capacitor.isNativePlatform() && typeof BusLocation.requestPermissions === "function") {
+      try {
+        const res = await BusLocation.requestPermissions({ permissions: ["notifications"] });
+        if (res?.notifications === "granted") notificationGranted = true;
+      } catch (e) {
+        console.warn("Native notification permission:", e);
+      }
+    }
+    if (!notificationGranted && "Notification" in window && typeof Notification.requestPermission === "function") {
+      try {
+        const status = await Notification.requestPermission();
+        notificationGranted = status === "granted";
+      } catch (e) {
+        console.warn("Web notification permission:", e);
+      }
+    }
+  } catch (err) {
+    console.warn("Error requesting notification permission:", err);
+  }
+
+  // 2. Geolocation Permission (Android Native + Web)
+  try {
+    if (Capacitor.isNativePlatform() && typeof BusLocation.requestPermissions === "function") {
+      try {
+        const res = await BusLocation.requestPermissions({ permissions: ["location"] });
+        if (res?.location === "granted") locationGranted = true;
+      } catch (e) {
+        console.warn("Native location permission:", e);
+      }
+    }
+    if (navigator.geolocation) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 6000);
+        navigator.geolocation.getCurrentPosition(
+          () => {
+            clearTimeout(timer);
+            locationGranted = true;
+            resolve();
+          },
+          (err) => {
+            clearTimeout(timer);
+            console.warn("Geolocation permission error/warning:", err?.message);
+            resolve();
+          },
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
+        );
+      });
+    }
+  } catch (err) {
+    console.warn("Error requesting geolocation permission:", err);
+  }
+
+  return { location: locationGranted, notification: notificationGranted };
+}
+
+function useGeolocation(enabled = false) {
   const [position, setPosition] = useState<GeolocationPosition | null>(null);
   const [available, setAvailable] = useState(true);
 
   useEffect(() => {
+    if (!enabled) return;
     if (!navigator.geolocation) {
       setAvailable(false);
       return;
     }
-    const watch = navigator.geolocation.watchPosition(setPosition, () => setAvailable(false), { enableHighAccuracy: true, maximumAge: 10000 });
+    const watch = navigator.geolocation.watchPosition(
+      setPosition,
+      () => setAvailable(false),
+      { enableHighAccuracy: true, maximumAge: 10000 }
+    );
     return () => navigator.geolocation.clearWatch(watch);
-  }, []);
+  }, [enabled]);
 
   return { position, available };
 }
@@ -552,7 +615,7 @@ function BottomNav({ active, onNav }: { active: string; onNav: (s: Screen) => vo
 
 function MockMapView({ animateBus = true, height = 280 }: { animateBus?: boolean; height?: number }) {
   const [t, setT] = useState(0.3);
-  const { position, available } = useGeolocation();
+  const position = null;
   useEffect(() => {
     if (!animateBus) return;
     const id = setInterval(() => setT(p => (p + 0.002) % 1), 50);
@@ -1179,13 +1242,19 @@ function LoginScreen({
 
       try {
         const cleanEmail = email.trim().toLowerCase();
+        const enteredName = name.trim();
+        try {
+          sessionStorage.setItem("rit_pending_name", enteredName);
+          localStorage.setItem("rit_pending_name_" + cleanEmail, enteredName);
+        } catch { }
+
         const cred = await createUserWithEmailAndPassword(auth, cleanEmail, pw);
         try {
-          await updateProfile(cred.user, { displayName: name.trim() });
+          await updateProfile(cred.user, { displayName: enteredName });
         } catch { }
         await createUserProfile(cred.user.uid, {
           email: cleanEmail,
-          name: name.trim(),
+          name: enteredName,
           role: "student",
         });
         // onAuthStateChanged in App will immediately detect this user and route to student-home
@@ -1193,7 +1262,32 @@ function LoginScreen({
         console.error("Firebase sign up error:", err);
         const code = err?.code || "";
         if (code === "auth/email-already-in-use") {
-          setError("An account with this email already exists. Please sign in.");
+          try {
+            const cleanEmail = email.trim().toLowerCase();
+            const enteredName = name.trim();
+            try {
+              sessionStorage.setItem("rit_pending_name", enteredName);
+              localStorage.setItem("rit_pending_name_" + cleanEmail, enteredName);
+            } catch { }
+
+            const signInCred = await signInWithEmailAndPassword(auth, cleanEmail, pw);
+            try {
+              await updateProfile(signInCred.user, { displayName: enteredName });
+            } catch { }
+            await createUserProfile(signInCred.user.uid, {
+              email: cleanEmail,
+              name: enteredName,
+              role: "student",
+            });
+            try {
+              await updateUserProfile(signInCred.user.uid, {
+                name: enteredName,
+              });
+            } catch { }
+            return;
+          } catch {
+            setError("An account with this email already exists. Please sign in.");
+          }
         } else if (code === "auth/weak-password") {
           setError("Password must be at least 6 characters.");
         } else if (code === "auth/invalid-email") {
@@ -1550,12 +1644,14 @@ function StudentHome({
   buses,
   stopsByRoute,
   onSelectBus,
+  onTrackBus,
 }: {
   onNav: (s: Screen) => void;
   user: UserProfile;
   buses: FireBus[];
   stopsByRoute: Record<string, FireRouteStop[]>;
   onSelectBus: (id: string) => void;
+  onTrackBus: (id?: string) => void;
 }) {
   // Do not automatically select the first bus. Restore only a bus that the
   // student explicitly selected previously.
@@ -1687,7 +1783,21 @@ function StudentHome({
               const stops = stopsByRoute[bus.r] ?? [];
               const nextStop = stops.find(s => s.state === "current") ?? stops.find(s => s.state === "upcoming");
               return (
-                <button key={bus.id} onClick={() => openBus(bus)} style={{ width: "100%", background: isSelected ? C.blueSubtle : C.surface, border: `1.5px solid ${isSelected ? C.blue : C.border}`, borderRadius: 18, padding: 16, textAlign: "left", cursor: "pointer", boxShadow: "0 4px 14px rgba(13,27,42,0.05)", animation: `fadeUp 0.3s ${index * 0.05}s both` }}>
+                <div
+                  key={bus.id}
+                  onClick={() => openBus(bus)}
+                  style={{
+                    width: "100%",
+                    background: isSelected ? C.blueSubtle : C.surface,
+                    border: `1.5px solid ${isSelected ? C.blue : C.border}`,
+                    borderRadius: 18,
+                    padding: 16,
+                    textAlign: "left",
+                    cursor: "pointer",
+                    boxShadow: "0 4px 14px rgba(13,27,42,0.05)",
+                    animation: `fadeUp 0.3s ${index * 0.05}s both`,
+                  }}
+                >
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ width: 48, height: 48, flexShrink: 0, borderRadius: 13, background: C.blue, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 21 }}>🚌</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -1710,7 +1820,56 @@ function StudentHome({
                       <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{bus.eta > 0 ? `${bus.eta} min` : "—"}</div>
                     </div>
                   </div>
-                </button>
+
+                  <div style={{ display: "flex", gap: 8, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTrackBus(bus.id);
+                      }}
+                      style={{
+                        flex: 1,
+                        height: 38,
+                        borderRadius: 10,
+                        background: C.blue,
+                        color: "#fff",
+                        border: "none",
+                        fontFamily: "Outfit,sans-serif",
+                        fontWeight: 700,
+                        fontSize: 13,
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 6,
+                      }}
+                    >
+                      📍 Track Bus
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openBus(bus);
+                      }}
+                      style={{
+                        height: 38,
+                        padding: "0 14px",
+                        borderRadius: 10,
+                        background: C.bg,
+                        color: C.text,
+                        border: `1px solid ${C.border}`,
+                        fontFamily: "Outfit,sans-serif",
+                        fontWeight: 600,
+                        fontSize: 13,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Details
+                    </button>
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -1721,12 +1880,12 @@ function StudentHome({
           <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: "0.9px", marginBottom: 10 }}>QUICK ACTIONS</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             {[
-              { label: "Live Map", icon: "🗺️", to: "live-map" as Screen },
-              { label: "Find My Bus", icon: "🔎", to: "find-bus" as Screen },
-              { label: "Route Stops", icon: "🛣️", to: "route-stops" as Screen },
-              { label: "My Trips", icon: "🎫", to: "my-trips" as Screen },
+              { label: "Track Bus", icon: "🗺️", onClick: () => onTrackBus(selectedId || undefined) },
+              { label: "Find My Bus", icon: "🔎", onClick: () => onNav("find-bus") },
+              { label: "Route Stops", icon: "🛣️", onClick: () => onNav("route-stops") },
+              { label: "My Trips", icon: "🎫", onClick: () => onNav("my-trips") },
             ].map(action => (
-              <button key={action.label} onClick={() => onNav(action.to)} style={{ minHeight: 76, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: "13px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", textAlign: "left" }}>
+              <button key={action.label} onClick={action.onClick} style={{ minHeight: 76, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: "13px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", textAlign: "left" }}>
                 <span style={{ fontSize: 22 }}>{action.icon}</span>
                 <span style={{ fontFamily: "Inter,sans-serif", fontWeight: 700, fontSize: 13, color: C.text }}>{action.label}</span>
               </button>
@@ -1822,7 +1981,19 @@ function LiveMapScreen({ onNav, buses, stopsByRoute, selectedBus }: { onNav: (s:
 }
 
 // 5 ─ Bus Details
-function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Screen) => void; selectedBus?: FireBus; stopsByRoute: Record<string, FireRouteStop[]> }) {
+function BusDetailsScreen({
+  onNav,
+  selectedBus,
+  stopsByRoute,
+  onTrackBus,
+  studentPosition,
+}: {
+  onNav: (s: Screen) => void;
+  selectedBus?: FireBus;
+  stopsByRoute: Record<string, FireRouteStop[]>;
+  onTrackBus?: (busId?: string) => void;
+  studentPosition?: GeolocationPosition | null;
+}) {
   const bus = selectedBus ?? EMPTY_BUS;
   const statusText = bus.live ? "LIVE" : "OFFLINE";
   const busPosition = bus.lat != null && bus.lng != null ? { lat: bus.lat, lng: bus.lng } : null;
@@ -1837,9 +2008,8 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
   // current location, so students can't request a pickup that's no longer
   // possible. We find the stop nearest to the student's own GPS position
   // and check whether that stop's live state is already "done".
-  const { position: myPosition } = useGeolocation();
-  const myLoc = myPosition
-    ? { lat: myPosition.coords.latitude, lng: myPosition.coords.longitude }
+  const myLoc = studentPosition
+    ? { lat: studentPosition.coords.latitude, lng: studentPosition.coords.longitude }
     : null;
   const busHasPassedMe = (() => {
     if (!myLoc) return false;
@@ -1900,15 +2070,18 @@ function BusDetailsScreen({ onNav, selectedBus, stopsByRoute }: { onNav: (s: Scr
           ))}
         </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
-          <GhostBtn label="View Full Route" onClick={() => onNav("route-stops")} />
-          {busHasPassedMe ? (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, fontFamily: "Inter,sans-serif", fontSize: 12, color: C.muted, textAlign: "center", padding: "0 10px" }}>
-              Bus has already passed your location
-            </div>
-          ) : (
-            <PrimaryBtn label="📍 Pickup Here" onClick={() => onNav("stop-here")} />
-          )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <PrimaryBtn label="📍 Track Bus Live" onClick={() => onTrackBus ? onTrackBus(bus.id) : onNav("live-map")} />
+          <div style={{ display: "flex", gap: 10 }}>
+            <GhostBtn label="View Full Route" onClick={() => onNav("route-stops")} />
+            {busHasPassedMe ? (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, background: C.bg, border: `1px solid ${C.border}`, fontFamily: "Inter,sans-serif", fontSize: 12, color: C.muted, textAlign: "center", padding: "0 10px" }}>
+                Bus has already passed your location
+              </div>
+            ) : (
+              <PrimaryBtn label="📍 Pickup Here" onClick={() => onNav("stop-here")} />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -2077,7 +2250,7 @@ function useLiveStopArrivalTimes(
 }
 
 // 6 ─ Route & Stops
-function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", assignedBus, selectedBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; backTo?: Screen; assignedBus?: FireBus; selectedBus?: FireBus }) {
+function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", assignedBus, selectedBus, onTrackBus }: { onNav: (s: Screen) => void; buses: FireBus[]; stopsByRoute: Record<string, FireRouteStop[]>; backTo?: Screen; assignedBus?: FireBus; selectedBus?: FireBus; onTrackBus?: (busId?: string) => void }) {
   const myBus = selectedBus ?? assignedBus ?? buses[0] ?? EMPTY_BUS;
   const rawStops = myBus ? (stopsByRoute[myBus.r] ?? []) : [];
   const tripDirection = getTripDirection(myBus);
@@ -2110,7 +2283,7 @@ function RouteStopsScreen({ onNav, buses, stopsByRoute, backTo = "bus-details", 
             <span style={{ fontSize: 10, fontWeight: 700, color: C.muted }}>OFFLINE</span>
           )}
           <button
-            onClick={() => onNav("live-map")}
+            onClick={() => onTrackBus ? onTrackBus(myBus.id) : onNav("live-map")}
             style={{
               position: "fixed",
               right: 24,
@@ -2259,7 +2432,7 @@ function FindBusScreen({ onNav, buses, onSelectBus }: { onNav: (s: Screen) => vo
 }
 
 // 8 ─ Request Pickup
-function StopHereScreen({ onNav, selectedBus, user }: { onNav: (s: Screen) => void; selectedBus?: FireBus; user: UserProfile }) {
+function StopHereScreen({ onNav, selectedBus, user, onTrackBus }: { onNav: (s: Screen) => void; selectedBus?: FireBus; user: UserProfile; onTrackBus?: (busId?: string) => void }) {
   const [step, setStep] = useState<"view" | "confirm" | "done">("view");
   const [sharing, setSharing] = useState(false);
   const [error, setError] = useState("");
@@ -2273,6 +2446,7 @@ function StopHereScreen({ onNav, selectedBus, user }: { onNav: (s: Screen) => vo
       setError("Location is not supported on this device/browser.");
       return;
     }
+
     setSharing(true);
     setError("");
     navigator.geolocation.getCurrentPosition(async position => {
@@ -2309,7 +2483,7 @@ function StopHereScreen({ onNav, selectedBus, user }: { onNav: (s: Screen) => vo
       <div style={{ width: 72, height: 72, borderRadius: "50%", background: C.liveBg, display: "flex", alignItems: "center", justifyContent: "center", color: C.live, marginBottom: 20 }}>{Ic.check}</div>
       <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 22, color: C.text, marginBottom: 8 }}>Location Shared</div>
       <div style={{ fontFamily: "Inter,sans-serif", fontSize: 14, color: C.sub, textAlign: "center", lineHeight: 1.6, marginBottom: 28 }}>The driver assigned to {selectedBus?.r ?? "this bus"} has been notified and your location is visible on their map.</div>
-      <PrimaryBtn label="Track Bus" onClick={() => onNav("live-map")} />
+      <PrimaryBtn label="Track Bus" onClick={() => onTrackBus ? onTrackBus(selectedBus?.id) : onNav("live-map")} />
     </div>
   );
 
@@ -2496,9 +2670,26 @@ function SettingsScreen({ onNav, preferences, setPreferences }: { onNav: (s: Scr
 }
 
 // 13 ─ Profile
-function ProfileScreen({ onNav, onLogout, user, language }: { onNav: (s: Screen) => void; onLogout: () => void; user: UserProfile; language: Language }) {
+function ProfileScreen({
+  onNav,
+  onLogout,
+  user,
+  language,
+  onUpdateName,
+}: {
+  onNav: (s: Screen) => void;
+  onLogout: () => void;
+  user: UserProfile;
+  language: Language;
+  onUpdateName?: (newName: string) => Promise<void>;
+}) {
   const text = copy[language];
-  const initials = user.name.split(" ").map(part => part[0]).join("").slice(0, 2).toUpperCase();
+  const initials = (user.name || "Student").split(" ").map(part => part[0]).join("").slice(0, 2).toUpperCase();
+  const [editing, setEditing] = useState(false);
+  const [nameInput, setNameInput] = useState(user.name);
+  const [saving, setSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
   return (
     <div style={{ position: "absolute", inset: 0, background: C.bg, display: "flex", flexDirection: "column" }}>
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
@@ -2509,10 +2700,112 @@ function ProfileScreen({ onNav, onLogout, user, language }: { onNav: (s: Screen)
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 20px 88px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, marginBottom: 16 }}>
-          <div style={{ width: 52, height: 52, borderRadius: 14, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 20, color: "#fff" }}>{initials}</div>
-          <div>
-            <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 700, fontSize: 17, color: C.text }}>{user.name}</div>
-            <div style={{ fontFamily: "Inter,sans-serif", fontSize: 13, color: C.sub, marginTop: 1 }}>{user.email}</div>
+          <div style={{ width: 52, height: 52, borderRadius: 14, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 20, color: "#fff", flexShrink: 0 }}>{initials}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {editing ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  placeholder="Enter full name"
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: `1.5px solid ${C.blue}`,
+                    fontSize: 15,
+                    fontFamily: "Outfit,sans-serif",
+                    fontWeight: 700,
+                    color: C.text,
+                    background: C.bg,
+                    outline: "none",
+                  }}
+                  autoFocus
+                />
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    onClick={async () => {
+                      if (!nameInput.trim() || saving) return;
+                      setSaving(true);
+                      try {
+                        if (onUpdateName) await onUpdateName(nameInput.trim());
+                        setEditing(false);
+                        setSaveSuccess(true);
+                        setTimeout(() => setSaveSuccess(false), 3000);
+                      } catch (e) {
+                        console.error(e);
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                    disabled={saving || !nameInput.trim()}
+                    style={{
+                      padding: "6px 14px",
+                      borderRadius: 8,
+                      background: C.blue,
+                      color: "#fff",
+                      border: "none",
+                      fontWeight: 700,
+                      fontSize: 12,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setNameInput(user.name);
+                      setEditing(false);
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 8,
+                      background: "transparent",
+                      border: `1px solid ${C.border}`,
+                      color: C.sub,
+                      fontWeight: 600,
+                      fontSize: 12,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 700, fontSize: 17, color: C.text }}>{user.name}</div>
+                  {onUpdateName && (
+                    <button
+                      onClick={() => {
+                        setNameInput(user.name);
+                        setEditing(true);
+                      }}
+                      title="Edit name"
+                      style={{
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: "2px 6px",
+                        fontSize: 12,
+                        color: C.blue,
+                        fontWeight: 600,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 2,
+                      }}
+                    >
+                      ✏️ Edit
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontFamily: "Inter,sans-serif", fontSize: 13, color: C.sub, marginTop: 1 }}>{user.email}</div>
+                {saveSuccess && (
+                  <div style={{ fontSize: 12, color: C.live, fontWeight: 600, marginTop: 4 }}>✓ Name updated successfully</div>
+                )}
+              </div>
+            )}
           </div>
         </div>
         <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2599,7 +2892,19 @@ function DriverHome({ onNav, onLogout, user, assignedBus }: { onNav: (s: Screen)
           ))}
         </div>
 
-        <button onClick={() => assignedBus && onNav("driver-start")} disabled={!assignedBus} style={{ width: "100%", height: 54, borderRadius: 14, background: assignedBus ? C.live : C.muted, color: "#fff", border: "none", fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 18, cursor: assignedBus ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 10 }}>
+        <button
+          onClick={async () => {
+            if (!assignedBus) return;
+            try {
+              await requestTrackingPermissions();
+            } catch (e) {
+              console.warn("Driver permission prompt:", e);
+            }
+            onNav("driver-start");
+          }}
+          disabled={!assignedBus}
+          style={{ width: "100%", height: 54, borderRadius: 14, background: assignedBus ? C.live : C.muted, color: "#fff", border: "none", fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 18, cursor: assignedBus ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 10 }}
+        >
           {Ic.play} START TRIP
         </button>
       </div>
@@ -2612,14 +2917,18 @@ function DriverStartTrip({ onNav, assignedBus, onTripStart }: { onNav: (s: Scree
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
 
-  function start() {
-
+  async function start() {
     setLoading(true);
-    setTimeout(() => { setDone(true); setTimeout(() => onNav("driver-live"), 1000); }, 1400);
+    try {
+      await requestTrackingPermissions();
+    } catch (e) {
+      console.warn("Driver tracking permission error:", e);
+    }
     const trip: Trip = { bus: assignedBus?.r ?? "—", from: assignedBus?.routeName?.split("→")[0]?.trim() ?? "—", to: assignedBus?.routeName?.split("→")[1]?.trim() ?? "—", date: `Today, ${nowLabel()}`, status: "In progress" };
     localStorage.setItem("rit-active-trip", JSON.stringify(trip));
     if (assignedBus?.id) setBusLive(assignedBus.id, true).catch(err => console.error("Unable to mark bus live", err));
     onTripStart(); // starts background GPS tracking (owned by App)
+    setTimeout(() => { setDone(true); setTimeout(() => onNav("driver-live"), 800); }, 1000);
   }
 
   return (
@@ -2911,7 +3220,7 @@ function AdminDashboard({
         color: C.blue,
       },
       {
-        l: "Edit Buses",
+        l: "Manage Buses",
         badge: `${buses.length} buses`,
         target: "admin-edit-bus",
         icon: Ic.edit,
@@ -4311,6 +4620,9 @@ function AdminEditBusScreen({
   onNav?: (s: Screen) => void;
 }) {
   const [selectedBus, setSelectedBus] = useState<FireBus | null>(initialBus ?? null);
+  const [busToDelete, setBusToDelete] = useState<FireBus | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
     if (initialBus) setSelectedBus(initialBus);
@@ -4322,7 +4634,7 @@ function AdminEditBusScreen({
       <div style={{ position: "absolute", inset: 0, background: C.bg, display: "flex", flexDirection: "column" }}>
         <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
           <StatusBar />
-          <TopBar title="Edit Buses" onBack={onBack} />
+          <TopBar title="Manage Buses" onBack={onBack} />
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 32px" }}>
@@ -4331,7 +4643,7 @@ function AdminEditBusScreen({
               Available Buses ({buses.length})
             </div>
             <div style={{ fontFamily: "Inter,sans-serif", fontSize: 12, color: C.sub, marginTop: 4 }}>
-              Click on the bus you want to edit its driver, bus details, or route information.
+              Click to edit details, or use the delete button to completely erase a bus from the fleet.
             </div>
           </div>
 
@@ -4409,15 +4721,172 @@ function AdminEditBusScreen({
                     <div style={{ fontFamily: "Inter,sans-serif", fontSize: 12, color: b.driverEmail ? C.text : C.muted }}>
                       👨‍✈️ {b.driverEmail || "No driver assigned"}
                     </div>
-                    <span style={{ fontFamily: "Outfit,sans-serif", fontWeight: 700, fontSize: 12, color: C.blue, display: "flex", alignItems: "center", gap: 4 }}>
-                      Edit Bus ✏️
-                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setBusToDelete(b);
+                        }}
+                        style={{
+                          padding: "5px 12px",
+                          borderRadius: 8,
+                          background: "#FFEBEE",
+                          border: "1.5px solid #EF5350",
+                          color: "#C62828",
+                          fontFamily: "Outfit,sans-serif",
+                          fontWeight: 700,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        🗑️ Delete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBus(b)}
+                        style={{
+                          padding: "5px 12px",
+                          borderRadius: 8,
+                          background: C.skyLight,
+                          border: `1.5px solid ${C.blue}`,
+                          color: C.blue,
+                          fontFamily: "Outfit,sans-serif",
+                          fontWeight: 700,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        Edit ✏️
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
           )}
         </div>
+
+        {/* Delete Confirmation Modal */}
+        {busToDelete && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.65)",
+              zIndex: 9999,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 24,
+              animation: "adminFadeUp 0.2s ease both",
+            }}
+          >
+            <div
+              style={{
+                background: C.surface,
+                borderRadius: 20,
+                padding: 24,
+                maxWidth: 380,
+                width: "100%",
+                boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+                border: `1px solid ${C.border}`,
+                textAlign: "center",
+              }}
+            >
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 28,
+                  background: "#FFEBEE",
+                  color: "#C62828",
+                  fontSize: 26,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  margin: "0 auto 16px",
+                }}
+              >
+                🗑️
+              </div>
+
+              <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 19, color: C.text, marginBottom: 8 }}>
+                Delete Bus {busToDelete.n}?
+              </div>
+
+              <div style={{ fontFamily: "Inter,sans-serif", fontSize: 13, color: C.sub, lineHeight: 1.5, marginBottom: 20 }}>
+                Are you sure you want to delete <strong>{busToDelete.n} ({busToDelete.r})</strong>? This will completely erase it from Cloud Firestore and remove it from all live maps.
+              </div>
+
+              {deleteError && (
+                <div style={{ color: "#C62828", fontSize: 12, marginBottom: 12 }}>
+                  {deleteError}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => { setBusToDelete(null); setDeleteError(""); }}
+                  disabled={deleting}
+                  style={{
+                    flex: 1,
+                    height: 44,
+                    borderRadius: 10,
+                    border: `1px solid ${C.border}`,
+                    background: "transparent",
+                    color: C.sub,
+                    fontFamily: "Outfit,sans-serif",
+                    fontWeight: 700,
+                    fontSize: 14,
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!busToDelete) return;
+                    setDeleting(true);
+                    setDeleteError("");
+                    try {
+                      await deleteBus(busToDelete.id, busToDelete.r);
+                      setBusToDelete(null);
+                    } catch (err: any) {
+                      console.error("Delete bus error:", err);
+                      setDeleteError("Failed to delete bus: " + (err?.message || "Please check connection."));
+                    } finally {
+                      setDeleting(false);
+                    }
+                  }}
+                  disabled={deleting}
+                  style={{
+                    flex: 1,
+                    height: 44,
+                    borderRadius: 10,
+                    border: "none",
+                    background: "#D32F2F",
+                    color: "#fff",
+                    fontFamily: "Outfit,sans-serif",
+                    fontWeight: 700,
+                    fontSize: 14,
+                    cursor: deleting ? "default" : "pointer",
+                  }}
+                >
+                  {deleting ? "Deleting…" : "Delete Permanently"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -4428,6 +4897,7 @@ function AdminEditBusScreen({
       stopsByRoute={stopsByRoute}
       onBack={() => setSelectedBus(null)}
       onSaved={() => setSelectedBus(null)}
+      onDeleted={() => setSelectedBus(null)}
     />
   );
 }
@@ -4437,14 +4907,19 @@ function AdminEditBusForm({
   stopsByRoute,
   onBack,
   onSaved,
+  onDeleted,
 }: {
   bus: FireBus;
   stopsByRoute: Record<string, FireRouteStop[]>;
   onBack: () => void;
   onSaved: (bus: FireBus) => void;
+  onDeleted?: () => void;
 }) {
   const [tab, setTab] = useState<"bus" | "stops">("bus");
   const [drivers, setDrivers] = useState<UserProfile[]>([]);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
     const unsub = subscribeDrivers(setDrivers);
@@ -5117,6 +5592,48 @@ function AdminEditBusForm({
             <div style={{ height: 10 }} />
 
             <GhostBtn label="Cancel" onClick={onBack} />
+
+            {/* Danger Zone: Delete Bus */}
+            <div
+              style={{
+                marginTop: 32,
+                padding: "16px 18px",
+                borderRadius: 14,
+                background: "#FFEBEE",
+                border: "1.5px solid #FFCDD2",
+              }}
+            >
+              <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 700, fontSize: 14, color: "#C62828", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                <span>⚠️</span> Danger Zone
+              </div>
+              <div style={{ fontFamily: "Inter,sans-serif", fontSize: 12, color: "#555", lineHeight: 1.4, marginBottom: 12 }}>
+                Permanently delete <strong>{bus.n} ({bus.r})</strong> from Cloud Firestore. All live tracking and route data will be completely erased.
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={deleting}
+                style={{
+                  width: "100%",
+                  height: 44,
+                  borderRadius: 10,
+                  background: "#D32F2F",
+                  color: "#fff",
+                  border: "none",
+                  fontFamily: "Outfit,sans-serif",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  boxShadow: "0 2px 6px rgba(211,47,47,0.3)",
+                }}
+              >
+                🗑️ Delete Bus from Fleet
+              </button>
+            </div>
           </>
         ) : (
           <>
@@ -5432,6 +5949,125 @@ function AdminEditBusForm({
           </>
         )}
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.65)",
+            zIndex: 9999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            animation: "adminFadeUp 0.2s ease both",
+          }}
+        >
+          <div
+            style={{
+              background: C.surface,
+              borderRadius: 20,
+              padding: 24,
+              maxWidth: 380,
+              width: "100%",
+              boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+              border: `1px solid ${C.border}`,
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 28,
+                background: "#FFEBEE",
+                color: "#C62828",
+                fontSize: 26,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                margin: "0 auto 16px",
+              }}
+            >
+              🗑️
+            </div>
+
+            <div style={{ fontFamily: "Outfit,sans-serif", fontWeight: 800, fontSize: 19, color: C.text, marginBottom: 8 }}>
+              Erase Bus {bus.n}?
+            </div>
+
+            <div style={{ fontFamily: "Inter,sans-serif", fontSize: 13, color: C.sub, lineHeight: 1.5, marginBottom: 20 }}>
+              Are you sure you want to completely erase <strong>{bus.n} ({bus.r})</strong> from Cloud Firestore? This will permanently delete the bus and its route checkpoints.
+            </div>
+
+            {deleteError && (
+              <div style={{ color: "#C62828", fontSize: 12, marginBottom: 12 }}>
+                {deleteError}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => { setShowDeleteConfirm(false); setDeleteError(""); }}
+                disabled={deleting}
+                style={{
+                  flex: 1,
+                  height: 44,
+                  borderRadius: 10,
+                  border: `1px solid ${C.border}`,
+                  background: "transparent",
+                  color: C.sub,
+                  fontFamily: "Outfit,sans-serif",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError("");
+                  try {
+                    await deleteBus(bus.id, bus.r);
+                    setShowDeleteConfirm(false);
+                    if (onDeleted) {
+                      onDeleted();
+                    } else {
+                      onBack();
+                    }
+                  } catch (err: any) {
+                    console.error("Delete bus error:", err);
+                    setDeleteError("Failed to delete bus: " + (err?.message || "Please check connection."));
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+                disabled={deleting}
+                style={{
+                  flex: 1,
+                  height: 44,
+                  borderRadius: 10,
+                  border: "none",
+                  background: "#D32F2F",
+                  color: "#fff",
+                  fontFamily: "Outfit,sans-serif",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  cursor: deleting ? "default" : "pointer",
+                }}
+              >
+                {deleting ? "Deleting…" : "Delete Permanently"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -5441,10 +6077,14 @@ function AdminEditBusForm({
             // ══════════════════════════════════════════════════════════════════════════════
             export default function App() {
   const [screen, setScreen] = useState<Screen>("splash");
-              const [role, setRole] = useState<Role>("student");
-                const [key, setKey] = useState(0);
-                const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
-                const [editingBus, setEditingBus] = useState<FireBus | null>(null);
+  const [role, setRole] = useState<Role>("student");
+  const [key, setKey] = useState(0);
+  const [selectedBusId, setSelectedBusId] = useState<string | null>(null);
+  const [editingBus, setEditingBus] = useState<FireBus | null>(null);
+  const [studentTrackingEnabled, setStudentTrackingEnabled] = useState(false);
+  const [tripActive, setTripActive] = useState<boolean>(() => {
+    try { return !!localStorage.getItem("rit-active-trip"); } catch { return false; }
+  });
 
                 const [preferences, setPreferences] =
                 useStoredState<Preferences>(
@@ -5490,7 +6130,7 @@ function AdminEditBusForm({
                           const routeSubs = useRef<Record<string, () => void>>({ });
                             const previousBuses = useRef<FireBus[] | null>(null);
                             const previousStopRequests = useRef<FireStopRequest[] | null>(null);
-                            const {position: myPosition } = useGeolocation();
+                            const { position: myPosition } = useGeolocation(studentTrackingEnabled || (role === "driver" && tripActive));
 
   // Authentication state is exclusively driven by onAuthStateChanged
   useEffect(() => {
@@ -5507,38 +6147,83 @@ function AdminEditBusForm({
       }
 
                             try {
-        const profile = await getUserProfile(firebaseUser.uid);
-                            if (!profile) {
-                              console.warn("No user profile found in users/{uid} for UID:", firebaseUser.uid);
-                            await signOut(auth);
-                            setAuthError("No user profile found for this account. Please contact an administrator.");
-                            setUser({email: "", name: "RIT Student", role: "student" });
-                            setRole("student");
-                            setScreen("login");
-                            return;
+        const cleanEmail = (firebaseUser.email || "").trim().toLowerCase();
+        let pendingName = "";
+        try {
+          pendingName = sessionStorage.getItem("rit_pending_name") ||
+                        localStorage.getItem("rit_pending_name_" + cleanEmail) ||
+                        "";
+        } catch { }
+
+        let profile = await getUserProfile(firebaseUser.uid);
+        if (!profile) {
+          // Give registration submit up to 1.2s to write profile with user's entered name
+          for (let i = 0; i < 4; i++) {
+            await new Promise((r) => setTimeout(r, 300));
+            profile = await getUserProfile(firebaseUser.uid);
+            if (profile) break;
+          }
         }
 
-                            if (!["student", "driver", "admin"].includes(profile.role)) {
-                              console.warn("Invalid role in users/{uid}:", (profile as any).role);
-                            await signOut(auth);
-                            setAuthError(`Invalid account role "${(profile as any).role}". Please contact an administrator.`);
-                            setUser({email: "", name: "RIT Student", role: "student" });
-                            setRole("student");
-                            setScreen("login");
-                            return;
+        if (!profile) {
+          console.warn("No user profile found in users/{uid} for UID:", firebaseUser.uid, "Attempting auto-creation fallback...");
+          try {
+            const chosenName = (pendingName && pendingName.trim()) ||
+                               (firebaseUser.displayName && firebaseUser.displayName.trim()) ||
+                               nameFromEmail(firebaseUser.email || "");
+            profile = await createUserProfile(firebaseUser.uid, {
+              email: cleanEmail,
+              name: chosenName,
+              role: "student",
+            });
+          } catch (repairErr) {
+            console.error("Failed creating missing user profile in onAuthStateChanged:", repairErr);
+            await signOut(auth);
+            setAuthError("No user profile found for this account. Please contact an administrator.");
+            setUser({ email: "", name: "RIT Student", role: "student" });
+            setRole("student");
+            setScreen("login");
+            return;
+          }
+        } else if (pendingName && pendingName.trim() && profile.name !== pendingName.trim()) {
+          try {
+            await updateUserProfile(firebaseUser.uid, { name: pendingName.trim() });
+            profile.name = pendingName.trim();
+          } catch (e) {
+            console.warn("Could not sync pending name to profile:", e);
+          }
         }
 
-                            const verifiedUser: UserProfile = {
-                              uid: firebaseUser.uid,
-                            email: firebaseUser.email || profile.email || "",
-                            name: profile.name || firebaseUser.displayName || nameFromEmail(firebaseUser.email || ""),
-                            role: profile.role,
-                            assignedBusId: profile.assignedBusId,
+        if (!["student", "driver", "admin"].includes(profile.role)) {
+          console.warn("Invalid role in users/{uid}:", (profile as any).role);
+          await signOut(auth);
+          setAuthError(`Invalid account role "${(profile as any).role}". Please contact an administrator.`);
+          setUser({email: "", name: "RIT Student", role: "student" });
+          setRole("student");
+          setScreen("login");
+          return;
+        }
+
+        try {
+          sessionStorage.removeItem("rit_pending_name");
+          localStorage.removeItem("rit_pending_name_" + cleanEmail);
+        } catch { }
+
+        const resolvedName = (profile.name && profile.name.trim())
+          ? profile.name.trim()
+          : ((pendingName && pendingName.trim()) || (firebaseUser.displayName && firebaseUser.displayName.trim()) || nameFromEmail(firebaseUser.email || ""));
+
+        const verifiedUser: UserProfile = {
+          uid: firebaseUser.uid,
+          email: firebaseUser.email || profile.email || "",
+          name: resolvedName,
+          role: profile.role,
+          assignedBusId: profile.assignedBusId,
         };
 
-                            setAuthError("");
-                            setUser(verifiedUser);
-                            setRole(profile.role);
+        setAuthError("");
+        setUser(verifiedUser);
+        setRole(profile.role);
 
         setScreen((curr) => {
           if (curr === "splash") {
@@ -5646,15 +6331,11 @@ function AdminEditBusForm({
     (b) => b.driverEmail && user.email && b.driverEmail.toLowerCase() === user.email.toLowerCase()
                             );
 
-                            // Trip/tracking state lives here (not inside a screen) so GPS keeps running
-                            // while the driver navigates between screens or the app is in the background.
-                            const [tripActive, setTripActive] = useState<boolean>(() => {
-    try { return !!localStorage.getItem("rit-active-trip"); } catch { return false; }
-  });
-                              const driverPosition = useDriverBackgroundLocation(
+                            // Driver background location tracking (runs when active trip in progress)
+                            const driverPosition = useDriverBackgroundLocation(
                               assignedBus?.id ?? "",
                               role === "driver" && tripActive && !!assignedBus
-                              );
+                            );
 
   // Notify the currently logged-in driver when a student shares a location.
   useEffect(() => {
@@ -5727,6 +6408,35 @@ function AdminEditBusForm({
                               try {sessionStorage.removeItem("selectedBusId"); } catch { }
     }
   }, [buses, selectedBusId]);
+
+  async function handleStudentTrackBus(busId?: string) {
+    if (busId) {
+      setSelectedBusId(busId);
+      try { sessionStorage.setItem("selectedBusId", busId); } catch { }
+    }
+    setStudentTrackingEnabled(true);
+    try {
+      await requestTrackingPermissions();
+    } catch (e) {
+      console.warn("Track bus permission error:", e);
+    }
+    nav("live-map");
+  }
+
+  async function handleUpdateName(newName: string) {
+    const trimmed = newName.trim();
+    if (!trimmed || !user.uid) return;
+    try {
+      await updateUserProfile(user.uid, { name: trimmed });
+      if (auth.currentUser) {
+        await updateProfile(auth.currentUser, { displayName: trimmed }).catch(() => {});
+      }
+      setUser((prev) => ({ ...prev, name: trimmed }));
+    } catch (err) {
+      console.error("Failed to update name:", err);
+      throw err;
+    }
+  }
 
                               function nav(to: Screen) {
                                 setKey((k) => k + 1);
@@ -5807,6 +6517,7 @@ function AdminEditBusForm({
                                         buses={busesWithDistance}
                                         stopsByRoute={stopsByRoute}
                                         onSelectBus={setSelectedBusId}
+                                        onTrackBus={handleStudentTrackBus}
                                       />
                                     )}
 
@@ -5815,7 +6526,13 @@ function AdminEditBusForm({
                                     )}
 
                                     {screen === "bus-details" && (
-                                      <BusDetailsScreen onNav={nav} selectedBus={selectedBus} stopsByRoute={stopsByRoute} />
+                                      <BusDetailsScreen
+                                        onNav={nav}
+                                        selectedBus={selectedBus}
+                                        stopsByRoute={stopsByRoute}
+                                        onTrackBus={handleStudentTrackBus}
+                                        studentPosition={myPosition}
+                                      />
                                     )}
 
 
@@ -5827,6 +6544,7 @@ function AdminEditBusForm({
                                         assignedBus={assignedBus}
                                         selectedBus={selectedBus}
                                         backTo={role === "driver" ? "driver-home" : "student-home"}
+                                        onTrackBus={handleStudentTrackBus}
                                       />
                                     )}
 
@@ -5836,7 +6554,12 @@ function AdminEditBusForm({
                                     )}
 
                                     {screen === "stop-here" && (
-                                      <StopHereScreen onNav={nav} selectedBus={selectedBus} user={user} />
+                                       <StopHereScreen
+                                         onNav={nav}
+                                         selectedBus={selectedBus}
+                                         user={user}
+                                         onTrackBus={handleStudentTrackBus}
+                                       />
                                     )}
 
                                     {screen === "make-stop" && (
@@ -5857,6 +6580,7 @@ function AdminEditBusForm({
                                         onLogout={logout}
                                         user={user}
                                         language={preferences.language}
+                                        onUpdateName={handleUpdateName}
                                       />
                                     )}
 

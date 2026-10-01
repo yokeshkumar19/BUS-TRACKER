@@ -102,13 +102,13 @@ export async function createUserProfile(
   const userRef = doc(db, "users", uid);
   const data: UserProfile = {
     uid,
-    email: profile.email,
-    name: profile.name,
+    email: profile.email.trim().toLowerCase(),
+    name: profile.name.trim() || "RIT Student",
     role: profile.role || "student",
     ...(profile.assignedBusId ? { assignedBusId: profile.assignedBusId } : {}),
     createdAt: serverTimestamp(),
   };
-  await setDoc(userRef, data);
+  await setDoc(userRef, data, { merge: true });
   return data;
 }
 
@@ -246,11 +246,25 @@ export async function updateBus(
 }
 
 export async function deleteBus(
-  id: string
+  id: string,
+  routeCode?: string
 ) {
+  // 1. Delete bus document from Firestore
   await deleteDoc(
     doc(db, "buses", id)
   );
+
+  // 2. Clean up route and stops subcollection if routeCode is provided
+  if (routeCode) {
+    try {
+      const stopsRef = collection(db, "routes", routeCode, "stops");
+      const existing = await getDocs(stopsRef);
+      await Promise.all(existing.docs.map((d) => deleteDoc(d.ref)));
+      await deleteDoc(doc(db, "routes", routeCode));
+    } catch (err) {
+      console.warn("Could not delete route stops during bus deletion:", err);
+    }
+  }
 }
 
 // ── DRIVER BUS LOCATION ────────────────────────────────────────────────────
